@@ -1,2 +1,4 @@
 .env
 *.har
+*.exe
+*.exe~
