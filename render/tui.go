@@ -209,7 +209,7 @@ func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 	// actions
 	case "enter":
 		m.mode = modeDetail
-	case " ":
+	case " ", "space":
 		if m.expandedCol == m.cursorCol {
 			m.expandedCol = -1
 		} else {
