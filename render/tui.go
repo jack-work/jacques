@@ -1,0 +1,728 @@
+package render
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/jokellih/jacques/kusto"
+	"github.com/jokellih/jacques/logging"
+	"golang.org/x/term"
+)
+
+type TUIOptions struct {
+	Height     int
+	TimeFormat string
+	Columns    []string
+}
+
+func DefaultTUIOptions() TUIOptions {
+	return TUIOptions{
+		Height:     20,
+		TimeFormat: "2006-01-02 15:04:05",
+	}
+}
+
+func TUI(result *kusto.QueryResult, opts TUIOptions) {
+	ctx := context.Background()
+
+	if result == nil || len(result.Columns) == 0 {
+		logging.Warn(ctx, "TUI received nil or empty result")
+		fmt.Fprintln(os.Stderr, "(no results)")
+		return
+	}
+
+	filtered := filterColumns(result, opts.Columns)
+	termWidth, termHeight := getTerminalSize()
+	logging.Info(ctx, "TUI starting",
+		logging.Int("columns", len(filtered.Columns)),
+		logging.Int("rows", len(filtered.Rows)),
+		logging.Int("term_width", termWidth),
+		logging.Int("term_height", termHeight),
+	)
+
+	cells := buildCells(filtered, opts)
+
+	m := &model{
+		result:     result,
+		filtered:   filtered,
+		cells:      cells,
+		opts:       opts,
+		termWidth:  termWidth,
+		termHeight: termHeight,
+		colWidths:  computeNaturalWidths(filtered, cells),
+	}
+
+	if _, err := tea.NewProgram(m).Run(); err != nil {
+		logging.Error(ctx, "TUI program error", logging.String("error", err.Error()))
+		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+		os.Exit(1)
+	}
+	logging.Info(ctx, "TUI exited cleanly")
+}
+
+// ---------------------------------------------------------------------------
+// model
+// ---------------------------------------------------------------------------
+
+type viewMode int
+
+const (
+	modeTable viewMode = iota
+	modeDetail
+	modeSearch
+)
+
+type searchMatch struct {
+	row, col int
+}
+
+type model struct {
+	result   *kusto.QueryResult // original (all columns) for detail view
+	filtered *kusto.QueryResult // column-filtered for table
+	cells    [][]string         // pre-formatted cell strings
+
+	opts       TUIOptions
+	termWidth  int
+	termHeight int
+	colWidths  []int // natural (unclamped) widths
+
+	cursorRow int
+	cursorCol int
+	scrollRow int
+	scrollCol int
+
+	expandedCol int // -1 = none
+	mode        viewMode
+
+	searchQuery   string
+	searchMatches []searchMatch
+	searchIdx     int
+}
+
+func (m *model) Init() tea.Cmd { return nil }
+
+func (m *model) viewRows() int {
+	return m.termHeight - 4 // header + separator + status + border
+}
+
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.termWidth = msg.Width
+		m.termHeight = msg.Height
+		return m, nil
+
+	case tea.KeyPressMsg:
+		return m.handleKey(msg)
+	}
+	return m, nil
+}
+
+func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	if m.mode == modeSearch {
+		return m.handleSearchInput(key, msg)
+	}
+
+	if m.mode == modeDetail {
+		return m.handleDetailKey(key)
+	}
+
+	return m.handleTableKey(key)
+}
+
+func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
+	numRows := len(m.cells)
+	numCols := len(m.filtered.Columns)
+	vr := m.viewRows()
+
+	switch key {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		if m.expandedCol >= 0 {
+			m.expandedCol = -1
+		} else if m.searchQuery != "" {
+			m.searchQuery = ""
+			m.searchMatches = nil
+		} else {
+			return m, tea.Quit
+		}
+
+	// vertical movement
+	case "j", "down":
+		if m.cursorRow < numRows-1 {
+			m.cursorRow++
+		}
+	case "k", "up":
+		if m.cursorRow > 0 {
+			m.cursorRow--
+		}
+	case "g":
+		m.cursorRow = 0
+	case "G":
+		m.cursorRow = numRows - 1
+	case "ctrl+d":
+		m.cursorRow += vr / 2
+		if m.cursorRow >= numRows {
+			m.cursorRow = numRows - 1
+		}
+	case "ctrl+u":
+		m.cursorRow -= vr / 2
+		if m.cursorRow < 0 {
+			m.cursorRow = 0
+		}
+	case "pgdown":
+		m.cursorRow += vr
+		if m.cursorRow >= numRows {
+			m.cursorRow = numRows - 1
+		}
+	case "pgup":
+		m.cursorRow -= vr
+		if m.cursorRow < 0 {
+			m.cursorRow = 0
+		}
+
+	// horizontal movement
+	case "h", "left":
+		if m.cursorCol > 0 {
+			m.cursorCol--
+			m.expandedCol = -1
+		}
+	case "l", "right":
+		if m.cursorCol < numCols-1 {
+			m.cursorCol++
+			m.expandedCol = -1
+		}
+	case "0":
+		m.cursorCol = 0
+		m.expandedCol = -1
+	case "$":
+		m.cursorCol = numCols - 1
+		m.expandedCol = -1
+
+	// actions
+	case "enter":
+		m.mode = modeDetail
+	case " ":
+		if m.expandedCol == m.cursorCol {
+			m.expandedCol = -1
+		} else {
+			m.expandedCol = m.cursorCol
+		}
+
+	// search
+	case "/":
+		m.mode = modeSearch
+		m.searchQuery = ""
+	case "n":
+		m.nextMatch(1)
+	case "N":
+		m.nextMatch(-1)
+	}
+
+	m.clampScroll()
+	return m, nil
+}
+
+func (m *model) handleDetailKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "esc", "enter":
+		m.mode = modeTable
+	case "j", "down":
+		if m.cursorRow < len(m.cells)-1 {
+			m.cursorRow++
+		}
+	case "k", "up":
+		if m.cursorRow > 0 {
+			m.cursorRow--
+		}
+	case "n":
+		m.nextMatch(1)
+	case "N":
+		m.nextMatch(-1)
+	}
+	return m, nil
+}
+
+func (m *model) handleSearchInput(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch key {
+	case "enter":
+		m.runSearch()
+		m.mode = modeTable
+		if len(m.searchMatches) > 0 {
+			m.searchIdx = 0
+			m.jumpToMatch()
+		}
+	case "esc":
+		m.mode = modeTable
+	case "backspace":
+		if len(m.searchQuery) > 0 {
+			m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+		}
+	default:
+		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+			m.searchQuery += key
+		} else if len(msg.Text) > 0 {
+			m.searchQuery += msg.Text
+		}
+	}
+	return m, nil
+}
+
+// ---------------------------------------------------------------------------
+// search
+// ---------------------------------------------------------------------------
+
+func (m *model) runSearch() {
+	m.searchMatches = nil
+	if m.searchQuery == "" {
+		return
+	}
+	q := strings.ToLower(m.searchQuery)
+	for r, row := range m.cells {
+		for c, cell := range row {
+			if strings.Contains(strings.ToLower(cell), q) {
+				m.searchMatches = append(m.searchMatches, searchMatch{r, c})
+			}
+		}
+	}
+}
+
+func (m *model) nextMatch(dir int) {
+	if len(m.searchMatches) == 0 {
+		return
+	}
+	m.searchIdx += dir
+	if m.searchIdx >= len(m.searchMatches) {
+		m.searchIdx = 0
+	}
+	if m.searchIdx < 0 {
+		m.searchIdx = len(m.searchMatches) - 1
+	}
+	m.jumpToMatch()
+}
+
+func (m *model) jumpToMatch() {
+	if m.searchIdx < 0 || m.searchIdx >= len(m.searchMatches) {
+		return
+	}
+	match := m.searchMatches[m.searchIdx]
+	m.cursorRow = match.row
+	m.cursorCol = match.col
+	m.clampScroll()
+}
+
+// ---------------------------------------------------------------------------
+// scrolling
+// ---------------------------------------------------------------------------
+
+func (m *model) clampScroll() {
+	vr := m.viewRows()
+	if m.cursorRow < m.scrollRow {
+		m.scrollRow = m.cursorRow
+	}
+	if m.cursorRow >= m.scrollRow+vr {
+		m.scrollRow = m.cursorRow - vr + 1
+	}
+
+	visibleCols := m.visibleColRange()
+	if m.cursorCol < m.scrollCol {
+		m.scrollCol = m.cursorCol
+	}
+	if m.cursorCol >= m.scrollCol+visibleCols {
+		m.scrollCol = m.cursorCol - visibleCols + 1
+	}
+	if m.scrollCol < 0 {
+		m.scrollCol = 0
+	}
+}
+
+func (m *model) visibleColRange() int {
+	w := m.termWidth - 2
+	count := 0
+	used := 0
+	for c := m.scrollCol; c < len(m.filtered.Columns); c++ {
+		cw := m.displayWidth(c)
+		if count > 0 {
+			cw += 3 // separator
+		}
+		if used+cw > w {
+			break
+		}
+		used += cw
+		count++
+	}
+	if count == 0 {
+		count = 1
+	}
+	return count
+}
+
+func (m *model) displayWidth(col int) int {
+	if col == m.expandedCol {
+		maxW := m.termWidth / 2
+		if m.colWidths[col] < maxW {
+			return m.colWidths[col]
+		}
+		return maxW
+	}
+	w := m.colWidths[col]
+	maxNormal := 30
+	if w > maxNormal {
+		w = maxNormal
+	}
+	if w < 4 {
+		w = 4
+	}
+	return w
+}
+
+// ---------------------------------------------------------------------------
+// view
+// ---------------------------------------------------------------------------
+
+var (
+	stHeader    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	stSep       = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	stNormal    = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	stCursor    = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("57"))
+	stRowHL     = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("236"))
+	stSearchHL  = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("220")).Bold(true)
+	stMatchCell = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	stHelp      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	stDetailKey = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
+	stDetailVal = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	stTitle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("229")).Background(lipgloss.Color("57")).Padding(0, 1)
+)
+
+func (m *model) View() tea.View {
+	switch m.mode {
+	case modeDetail:
+		return tea.NewView(m.viewDetail())
+	case modeSearch:
+		return tea.NewView(m.viewTable() + m.viewSearchPrompt())
+	default:
+		return tea.NewView(m.viewTable())
+	}
+}
+
+func (m *model) viewTable() string {
+	var b strings.Builder
+
+	colStart := m.scrollCol
+	colEnd := colStart + m.visibleColRange()
+	if colEnd > len(m.filtered.Columns) {
+		colEnd = len(m.filtered.Columns)
+	}
+
+	// header
+	m.writeHeaderRow(&b, colStart, colEnd)
+	b.WriteByte('\n')
+	m.writeSeparator(&b, colStart, colEnd)
+	b.WriteByte('\n')
+
+	// data rows
+	vr := m.viewRows()
+	rowEnd := m.scrollRow + vr
+	if rowEnd > len(m.cells) {
+		rowEnd = len(m.cells)
+	}
+	for r := m.scrollRow; r < rowEnd; r++ {
+		m.writeDataRow(&b, r, colStart, colEnd)
+		b.WriteByte('\n')
+	}
+
+	// status bar
+	b.WriteString(m.statusBar())
+	b.WriteByte('\n')
+
+	return b.String()
+}
+
+func (m *model) writeHeaderRow(b *strings.Builder, colStart, colEnd int) {
+	for c := colStart; c < colEnd; c++ {
+		if c > colStart {
+			b.WriteString(stSep.Render(" │ "))
+		}
+		w := m.displayWidth(c)
+		title := m.filtered.Columns[c].ColumnName
+		b.WriteString(stHeader.Render(padOrTruncate(title, w)))
+	}
+}
+
+func (m *model) writeSeparator(b *strings.Builder, colStart, colEnd int) {
+	for c := colStart; c < colEnd; c++ {
+		if c > colStart {
+			b.WriteString(stSep.Render("─┼─"))
+		}
+		w := m.displayWidth(c)
+		b.WriteString(stSep.Render(strings.Repeat("─", w)))
+	}
+}
+
+func (m *model) writeDataRow(b *strings.Builder, row, colStart, colEnd int) {
+	isCurrentRow := row == m.cursorRow
+
+	for c := colStart; c < colEnd; c++ {
+		if c > colStart {
+			b.WriteString(stSep.Render(" │ "))
+		}
+
+		w := m.displayWidth(c)
+		cellText := ""
+		if c < len(m.cells[row]) {
+			cellText = m.cells[row][c]
+		}
+		display := padOrTruncate(cellText, w)
+
+		isCurrentCell := isCurrentRow && c == m.cursorCol
+		isCellMatch := m.isCellSearchMatch(row, c)
+
+		if isCurrentCell {
+			display = m.highlightSearchInText(display)
+			b.WriteString(stCursor.Render(display))
+		} else if isCellMatch {
+			display = m.highlightSearchInText(display)
+			if isCurrentRow {
+				b.WriteString(stRowHL.Render(display))
+			} else {
+				b.WriteString(stMatchCell.Render(display))
+			}
+		} else if isCurrentRow {
+			b.WriteString(stRowHL.Render(display))
+		} else {
+			b.WriteString(stNormal.Render(display))
+		}
+	}
+}
+
+func (m *model) statusBar() string {
+	var parts []string
+	parts = append(parts, fmt.Sprintf("row %d/%d", m.cursorRow+1, len(m.cells)))
+	parts = append(parts, fmt.Sprintf("col %d/%d [%s]",
+		m.cursorCol+1, len(m.filtered.Columns),
+		m.filtered.Columns[m.cursorCol].ColumnName))
+
+	if len(m.searchMatches) > 0 {
+		parts = append(parts, fmt.Sprintf("/%s [%d/%d]", m.searchQuery, m.searchIdx+1, len(m.searchMatches)))
+	} else if m.searchQuery != "" {
+		parts = append(parts, fmt.Sprintf("/%s [no matches]", m.searchQuery))
+	}
+
+	left := stHelp.Render(strings.Join(parts, "  "))
+	right := stHelp.Render("hjkl:move  space:expand  enter:detail  /:search  n/N:next  q:quit")
+
+	gap := m.termWidth - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 2 {
+		return left
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+func (m *model) viewSearchPrompt() string {
+	return "\n" + stHelp.Render("/") + m.searchQuery + "█"
+}
+
+// ---------------------------------------------------------------------------
+// detail view
+// ---------------------------------------------------------------------------
+
+func (m *model) viewDetail() string {
+	idx := m.cursorRow
+	if idx < 0 || idx >= len(m.result.Rows) {
+		return "No row selected"
+	}
+
+	row := m.result.Rows[idx]
+	var b strings.Builder
+
+	b.WriteString(stTitle.Render(fmt.Sprintf(" Row %d/%d ", idx+1, len(m.result.Rows))))
+	b.WriteString("\n\n")
+
+	for i, col := range m.result.Columns {
+		val := ""
+		if i < len(row) {
+			val = formatValue(row[i], col.ColumnType, DefaultOptions())
+		}
+		if val == "" {
+			continue
+		}
+
+		key := stDetailKey.Render(fmt.Sprintf("%s:", col.ColumnName))
+		if m.searchQuery != "" {
+			val = m.highlightSearchInText(val)
+		}
+		value := stDetailVal.Render(val)
+		b.WriteString(fmt.Sprintf("  %s %s\n", key, value))
+	}
+
+	b.WriteString("\n")
+
+	var help []string
+	help = append(help, "esc/enter: back")
+	help = append(help, "j/k: prev/next row")
+	if len(m.searchMatches) > 0 {
+		help = append(help, fmt.Sprintf("n/N: search [%d/%d]", m.searchIdx+1, len(m.searchMatches)))
+	}
+	help = append(help, "q: quit")
+	b.WriteString(stHelp.Render("  " + strings.Join(help, "  ")))
+	b.WriteByte('\n')
+
+	return b.String()
+}
+
+// ---------------------------------------------------------------------------
+// search highlighting
+// ---------------------------------------------------------------------------
+
+func (m *model) isCellSearchMatch(row, col int) bool {
+	if m.searchQuery == "" {
+		return false
+	}
+	for _, sm := range m.searchMatches {
+		if sm.row == row && sm.col == col {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) highlightSearchInText(text string) string {
+	if m.searchQuery == "" {
+		return text
+	}
+	q := strings.ToLower(m.searchQuery)
+	lower := strings.ToLower(text)
+	idx := strings.Index(lower, q)
+	if idx < 0 {
+		return text
+	}
+
+	var b strings.Builder
+	for idx >= 0 {
+		b.WriteString(text[:idx])
+		matchEnd := idx + len(m.searchQuery)
+		b.WriteString(stSearchHL.Render(text[idx:matchEnd]))
+		text = text[matchEnd:]
+		lower = lower[matchEnd:]
+		idx = strings.Index(lower, q)
+	}
+	b.WriteString(text)
+	return b.String()
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+func getTerminalSize() (width, height int) {
+	w, h, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		return 120, 30
+	}
+	return w, h
+}
+
+func filterColumns(result *kusto.QueryResult, wanted []string) *kusto.QueryResult {
+	if len(wanted) == 0 {
+		return result
+	}
+
+	wantSet := make(map[string]int, len(wanted))
+	for i, name := range wanted {
+		wantSet[name] = i
+	}
+
+	type colMapping struct {
+		srcIdx, dstIdx int
+		col            kusto.Column
+	}
+	var mappings []colMapping
+	for i, col := range result.Columns {
+		if dstIdx, ok := wantSet[col.ColumnName]; ok {
+			mappings = append(mappings, colMapping{srcIdx: i, dstIdx: dstIdx, col: col})
+		}
+	}
+
+	cols := make([]kusto.Column, len(mappings))
+	for _, mp := range mappings {
+		cols[mp.dstIdx] = mp.col
+	}
+
+	rows := make([][]interface{}, len(result.Rows))
+	for r, srcRow := range result.Rows {
+		row := make([]interface{}, len(mappings))
+		for _, mp := range mappings {
+			if mp.srcIdx < len(srcRow) {
+				row[mp.dstIdx] = srcRow[mp.srcIdx]
+			}
+		}
+		rows[r] = row
+	}
+
+	return &kusto.QueryResult{Columns: cols, Rows: rows}
+}
+
+func buildCells(result *kusto.QueryResult, opts TUIOptions) [][]string {
+	tableOpts := DefaultOptions()
+	tableOpts.TimeFormat = opts.TimeFormat
+
+	cells := make([][]string, len(result.Rows))
+	for r, row := range result.Rows {
+		cells[r] = make([]string, len(result.Columns))
+		for c, val := range row {
+			colType := ""
+			if c < len(result.Columns) {
+				colType = result.Columns[c].ColumnType
+			}
+			cells[r][c] = formatValue(val, colType, tableOpts)
+		}
+	}
+	return cells
+}
+
+func computeNaturalWidths(result *kusto.QueryResult, cells [][]string) []int {
+	widths := make([]int, len(result.Columns))
+	for i, col := range result.Columns {
+		widths[i] = len(col.ColumnName)
+	}
+	for _, row := range cells {
+		for c, cell := range row {
+			if len(cell) > widths[c] {
+				widths[c] = len(cell)
+			}
+		}
+	}
+	return widths
+}
+
+func padOrTruncate(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if len(s) > w {
+		if w > 1 {
+			return s[:w-1] + "…"
+		}
+		return s[:w]
+	}
+	if len(s) < w {
+		return s + strings.Repeat(" ", w-len(s))
+	}
+	return s
+}
+
+func truncateStr(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
