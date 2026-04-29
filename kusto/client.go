@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"github.com/jokellih/jacques/data"
 	"github.com/jokellih/jacques/logging"
 )
 
@@ -49,31 +50,26 @@ type queryOptions struct {
 	RequestReadonlyHard  bool   `json:"request_readonly_hardline"`
 }
 
-// V2 response is an array of frames. We care about DataTable frames.
+// v2 wire types — internal to this package
 type v2Frame struct {
 	FrameType string          `json:"FrameType"`
 	TableName string          `json:"TableName"`
-	Columns   []Column        `json:"Columns"`
+	Columns   []v2Column      `json:"Columns"`
 	Rows      [][]interface{} `json:"Rows"`
 }
 
-type Column struct {
+type v2Column struct {
 	ColumnName string `json:"ColumnName"`
 	ColumnType string `json:"ColumnType"`
 }
 
-type QueryResult struct {
-	Columns []Column
-	Rows    [][]interface{}
-}
-
 var tracer = otel.Tracer("jacques/kusto")
 
-func (c *Client) Query(kql string) (*QueryResult, error) {
+func (c *Client) Query(kql string) (*data.Result, error) {
 	return c.QueryContext(context.Background(), kql)
 }
 
-func (c *Client) QueryContext(ctx context.Context, kql string) (*QueryResult, error) {
+func (c *Client) QueryContext(ctx context.Context, kql string) (*data.Result, error) {
 	ctx, span := tracer.Start(ctx, "kusto.Query")
 	defer span.End()
 
@@ -96,7 +92,7 @@ func (c *Client) QueryContext(ctx context.Context, kql string) (*QueryResult, er
 	return result, nil
 }
 
-func (c *Client) doQuery(ctx context.Context, kql string) (*QueryResult, error) {
+func (c *Client) doQuery(ctx context.Context, kql string) (*data.Result, error) {
 	body := queryRequest{
 		DB:  c.Database,
 		CSL: kql,
@@ -164,24 +160,26 @@ func (c *Client) doQuery(ctx context.Context, kql string) (*QueryResult, error) 
 
 	for _, f := range frames {
 		if f.FrameType == "DataTable" && f.TableName == "PrimaryResult" {
-			return &QueryResult{
-				Columns: f.Columns,
-				Rows:    f.Rows,
-			}, nil
+			return frameToResult(f), nil
 		}
 	}
 
 	for _, f := range frames {
 		if f.FrameType == "DataTable" && len(f.Rows) > 0 {
-			return &QueryResult{
-				Columns: f.Columns,
-				Rows:    f.Rows,
-			}, nil
+			return frameToResult(f), nil
 		}
 	}
 
 	logging.Warn(ctx, "no DataTable with rows found in response")
-	return &QueryResult{}, nil
+	return &data.Result{}, nil
+}
+
+func frameToResult(f v2Frame) *data.Result {
+	cols := make([]data.Column, len(f.Columns))
+	for i, c := range f.Columns {
+		cols[i] = data.Column{Name: c.ColumnName, Type: c.ColumnType}
+	}
+	return &data.Result{Columns: cols, Rows: f.Rows}
 }
 
 func truncate(s string, max int) string {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jokellih/jacques/kusto"
+	"github.com/jokellih/jacques/data"
 )
 
 type TableOptions struct {
@@ -25,7 +25,7 @@ func DefaultOptions() TableOptions {
 	}
 }
 
-func Table(w io.Writer, result *kusto.QueryResult, opts TableOptions) {
+func Table(w io.Writer, result *data.Result, opts TableOptions) {
 	if result == nil || len(result.Columns) == 0 {
 		fmt.Fprintln(w, "(no results)")
 		return
@@ -39,8 +39,8 @@ func Table(w io.Writer, result *kusto.QueryResult, opts TableOptions) {
 	headers := make([]string, len(result.Columns))
 	colTypes := make([]string, len(result.Columns))
 	for i, c := range result.Columns {
-		headers[i] = c.ColumnName
-		colTypes[i] = c.ColumnType
+		headers[i] = c.Name
+		colTypes[i] = c.Type
 	}
 
 	cells := make([][]string, len(rows))

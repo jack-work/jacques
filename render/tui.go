@@ -8,7 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/jokellih/jacques/kusto"
+	"github.com/jokellih/jacques/data"
 	"github.com/jokellih/jacques/logging"
 	"golang.org/x/term"
 )
@@ -26,7 +26,7 @@ func DefaultTUIOptions() TUIOptions {
 	}
 }
 
-func TUI(result *kusto.QueryResult, opts TUIOptions) {
+func TUI(result *data.Result, opts TUIOptions) {
 	ctx := context.Background()
 
 	if result == nil || len(result.Columns) == 0 {
@@ -81,8 +81,8 @@ type searchMatch struct {
 }
 
 type model struct {
-	result   *kusto.QueryResult // original (all columns) for detail view
-	filtered *kusto.QueryResult // column-filtered for table
+	result   *data.Result // original (all columns) for detail view
+	filtered *data.Result // column-filtered for table
 	cells    [][]string         // pre-formatted cell strings
 
 	opts       TUIOptions
@@ -498,7 +498,7 @@ func (m *model) writeHeaderRow(b *strings.Builder, colStart, colEnd int) {
 			b.WriteString(stSep.Render(" │ "))
 		}
 		w := m.displayWidth(c)
-		title := m.filtered.Columns[c].ColumnName
+		title := m.filtered.Columns[c].Name
 		b.WriteString(stHeader.Render(padOrTruncate(title, w)))
 	}
 }
@@ -623,7 +623,7 @@ func (m *model) statusBar() string {
 	parts = append(parts, fmt.Sprintf("row %d/%d", m.cursorRow+1, len(m.cells)))
 	parts = append(parts, fmt.Sprintf("col %d/%d [%s]",
 		m.cursorCol+1, len(m.filtered.Columns),
-		m.filtered.Columns[m.cursorCol].ColumnName))
+		m.filtered.Columns[m.cursorCol].Name))
 
 	if len(m.searchMatches) > 0 {
 		parts = append(parts, fmt.Sprintf("/%s [%d/%d]", m.searchQuery, m.searchIdx+1, len(m.searchMatches)))
@@ -664,13 +664,13 @@ func (m *model) viewDetail() string {
 	for i, col := range m.result.Columns {
 		val := ""
 		if i < len(row) {
-			val = formatValue(row[i], col.ColumnType, DefaultOptions())
+			val = formatValue(row[i], col.Type, DefaultOptions())
 		}
 		if val == "" {
 			continue
 		}
 
-		key := stDetailKey.Render(fmt.Sprintf("%s:", col.ColumnName))
+		key := stDetailKey.Render(fmt.Sprintf("%s:", col.Name))
 		if m.searchQuery != "" {
 			val = m.highlightSearchInText(val)
 		}
@@ -745,7 +745,7 @@ func getTerminalSize() (width, height int) {
 	return w, h
 }
 
-func filterColumns(result *kusto.QueryResult, wanted []string) *kusto.QueryResult {
+func filterColumns(result *data.Result, wanted []string) *data.Result {
 	if len(wanted) == 0 {
 		return result
 	}
@@ -757,16 +757,16 @@ func filterColumns(result *kusto.QueryResult, wanted []string) *kusto.QueryResul
 
 	type colMapping struct {
 		srcIdx, dstIdx int
-		col            kusto.Column
+		col            data.Column
 	}
 	var mappings []colMapping
 	for i, col := range result.Columns {
-		if dstIdx, ok := wantSet[col.ColumnName]; ok {
+		if dstIdx, ok := wantSet[col.Name]; ok {
 			mappings = append(mappings, colMapping{srcIdx: i, dstIdx: dstIdx, col: col})
 		}
 	}
 
-	cols := make([]kusto.Column, len(mappings))
+	cols := make([]data.Column, len(mappings))
 	for _, mp := range mappings {
 		cols[mp.dstIdx] = mp.col
 	}
@@ -782,10 +782,10 @@ func filterColumns(result *kusto.QueryResult, wanted []string) *kusto.QueryResul
 		rows[r] = row
 	}
 
-	return &kusto.QueryResult{Columns: cols, Rows: rows}
+	return &data.Result{Columns: cols, Rows: rows}
 }
 
-func buildCells(result *kusto.QueryResult, opts TUIOptions) [][]string {
+func buildCells(result *data.Result, opts TUIOptions) [][]string {
 	tableOpts := DefaultOptions()
 	tableOpts.TimeFormat = opts.TimeFormat
 
@@ -795,7 +795,7 @@ func buildCells(result *kusto.QueryResult, opts TUIOptions) [][]string {
 		for c, val := range row {
 			colType := ""
 			if c < len(result.Columns) {
-				colType = result.Columns[c].ColumnType
+				colType = result.Columns[c].Type
 			}
 			cells[r][c] = formatValue(val, colType, tableOpts)
 		}
@@ -803,10 +803,10 @@ func buildCells(result *kusto.QueryResult, opts TUIOptions) [][]string {
 	return cells
 }
 
-func computeNaturalWidths(result *kusto.QueryResult, cells [][]string) []int {
+func computeNaturalWidths(result *data.Result, cells [][]string) []int {
 	widths := make([]int, len(result.Columns))
 	for i, col := range result.Columns {
-		widths[i] = len(col.ColumnName)
+		widths[i] = len(col.Name)
 	}
 	for _, row := range cells {
 		for c, cell := range row {

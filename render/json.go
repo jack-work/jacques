@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/jokellih/jacques/kusto"
+	"github.com/jokellih/jacques/data"
 )
 
-func JSON(w io.Writer, result *kusto.QueryResult) {
+func JSON(w io.Writer, result *data.Result) {
 	if result == nil || len(result.Rows) == 0 {
 		fmt.Fprintln(w, "[]")
 		return
@@ -19,7 +19,7 @@ func JSON(w io.Writer, result *kusto.QueryResult) {
 		record := make(map[string]interface{}, len(result.Columns))
 		for j, col := range result.Columns {
 			if j < len(row) {
-				record[col.ColumnName] = row[j]
+				record[col.Name] = row[j]
 			}
 		}
 		records[i] = record

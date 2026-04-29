@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jokellih/jacques/kusto"
+	"github.com/jokellih/jacques/data"
 )
 
 type LogOptions struct {
@@ -28,7 +28,7 @@ func DefaultLogOptions() LogOptions {
 	}
 }
 
-func Log(w io.Writer, result *kusto.QueryResult, opts LogOptions) {
+func Log(w io.Writer, result *data.Result, opts LogOptions) {
 	if result == nil || len(result.Rows) == 0 {
 		fmt.Fprintln(w, "(no results)")
 		return
@@ -36,7 +36,7 @@ func Log(w io.Writer, result *kusto.QueryResult, opts LogOptions) {
 
 	colIdx := make(map[string]int)
 	for i, c := range result.Columns {
-		colIdx[c.ColumnName] = i
+		colIdx[c.Name] = i
 	}
 
 	if opts.ShowAllCols {
@@ -65,7 +65,7 @@ func Log(w io.Writer, result *kusto.QueryResult, opts LogOptions) {
 			parts = append(parts, formatLevel(row[levelIdx]))
 		}
 		for _, idx := range extraIdxs {
-			parts = append(parts, fmt.Sprintf("[%s=%v]", result.Columns[idx].ColumnName, row[idx]))
+			parts = append(parts, fmt.Sprintf("[%s=%v]", result.Columns[idx].Name, row[idx]))
 		}
 		if hasMsg {
 			parts = append(parts, toString(row[msgIdx]))
@@ -77,7 +77,7 @@ func Log(w io.Writer, result *kusto.QueryResult, opts LogOptions) {
 	fmt.Fprintf(w, "\n(%d log entries)\n", len(result.Rows))
 }
 
-func logAllColumns(w io.Writer, result *kusto.QueryResult, colIdx map[string]int, opts LogOptions) {
+func logAllColumns(w io.Writer, result *data.Result, colIdx map[string]int, opts LogOptions) {
 	for i, row := range result.Rows {
 		if i > 0 {
 			fmt.Fprintln(w, "---")
@@ -90,7 +90,7 @@ func logAllColumns(w io.Writer, result *kusto.QueryResult, colIdx map[string]int
 			if val == "" || val == "<nil>" {
 				continue
 			}
-			fmt.Fprintf(w, "  %s: %s\n", col.ColumnName, val)
+			fmt.Fprintf(w, "  %s: %s\n", col.Name, val)
 		}
 	}
 	fmt.Fprintf(w, "\n(%d log entries)\n", len(result.Rows))
