@@ -109,6 +109,26 @@ func (m *model) viewRows() int {
 	return m.termHeight - 4 // header + separator + status + border
 }
 
+func (m *model) expandedRowHeight() int {
+	if m.expandedCol < 0 {
+		return 1
+	}
+	cellText := ""
+	if m.cursorRow < len(m.cells) && m.expandedCol < len(m.cells[m.cursorRow]) {
+		cellText = m.cells[m.cursorRow][m.expandedCol]
+	}
+	w := m.displayWidth(m.expandedCol)
+	if w <= 0 || len(cellText) <= w {
+		return 1
+	}
+	lines := (len(cellText) + w - 1) / w
+	maxLines := m.viewRows() / 2
+	if lines > maxLines {
+		lines = maxLines
+	}
+	return lines
+}
+
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -329,8 +349,29 @@ func (m *model) clampScroll() {
 	if m.cursorRow < m.scrollRow {
 		m.scrollRow = m.cursorRow
 	}
-	if m.cursorRow >= m.scrollRow+vr {
-		m.scrollRow = m.cursorRow - vr + 1
+
+	// Ensure the cursor row (including its expanded height) fits in view
+	for {
+		linesUsed := 0
+		fits := false
+		for r := m.scrollRow; r < len(m.cells); r++ {
+			h := 1
+			if r == m.cursorRow && m.expandedCol >= 0 {
+				h = m.expandedRowHeight()
+			}
+			if r == m.cursorRow && linesUsed+h <= vr {
+				fits = true
+				break
+			}
+			linesUsed += h
+			if linesUsed >= vr {
+				break
+			}
+		}
+		if fits || m.scrollRow >= m.cursorRow {
+			break
+		}
+		m.scrollRow++
 	}
 
 	visibleCols := m.visibleColRange()
@@ -431,13 +472,17 @@ func (m *model) viewTable() string {
 
 	// data rows
 	vr := m.viewRows()
-	rowEnd := m.scrollRow + vr
-	if rowEnd > len(m.cells) {
-		rowEnd = len(m.cells)
-	}
-	for r := m.scrollRow; r < rowEnd; r++ {
-		m.writeDataRow(&b, r, colStart, colEnd)
-		b.WriteByte('\n')
+	linesUsed := 0
+	for r := m.scrollRow; r < len(m.cells) && linesUsed < vr; r++ {
+		rowLines := m.renderDataRow(r, colStart, colEnd)
+		for _, line := range rowLines {
+			if linesUsed >= vr {
+				break
+			}
+			b.WriteString(line)
+			b.WriteByte('\n')
+			linesUsed++
+		}
 	}
 
 	// status bar
@@ -468,40 +513,109 @@ func (m *model) writeSeparator(b *strings.Builder, colStart, colEnd int) {
 	}
 }
 
-func (m *model) writeDataRow(b *strings.Builder, row, colStart, colEnd int) {
+func (m *model) renderDataRow(row, colStart, colEnd int) []string {
 	isCurrentRow := row == m.cursorRow
+	isExpanded := isCurrentRow && m.expandedCol >= 0
 
-	for c := colStart; c < colEnd; c++ {
-		if c > colStart {
-			b.WriteString(stSep.Render(" │ "))
-		}
+	numLines := 1
+	if isExpanded {
+		numLines = m.expandedRowHeight()
+	}
 
+	// For each column, compute wrapped lines
+	type colLines struct {
+		lines []string
+		width int
+	}
+	colData := make([]colLines, colEnd-colStart)
+
+	for ci, c := range rangeSlice(colStart, colEnd) {
 		w := m.displayWidth(c)
 		cellText := ""
 		if c < len(m.cells[row]) {
 			cellText = m.cells[row][c]
 		}
-		display := padOrTruncate(cellText, w)
 
-		isCurrentCell := isCurrentRow && c == m.cursorCol
-		isCellMatch := m.isCellSearchMatch(row, c)
-
-		if isCurrentCell {
-			display = m.highlightSearchInText(display)
-			b.WriteString(stCursor.Render(display))
-		} else if isCellMatch {
-			display = m.highlightSearchInText(display)
-			if isCurrentRow {
-				b.WriteString(stRowHL.Render(display))
-			} else {
-				b.WriteString(stMatchCell.Render(display))
-			}
-		} else if isCurrentRow {
-			b.WriteString(stRowHL.Render(display))
+		if isExpanded && c == m.expandedCol {
+			colData[ci] = colLines{wrapText(cellText, w, numLines), w}
 		} else {
-			b.WriteString(stNormal.Render(display))
+			colData[ci] = colLines{[]string{padOrTruncate(cellText, w)}, w}
 		}
 	}
+
+	output := make([]string, numLines)
+	for lineIdx := 0; lineIdx < numLines; lineIdx++ {
+		var b strings.Builder
+		for ci, c := range rangeSlice(colStart, colEnd) {
+			if ci > 0 {
+				b.WriteString(stSep.Render(" │ "))
+			}
+
+			display := strings.Repeat(" ", colData[ci].width)
+			if lineIdx < len(colData[ci].lines) {
+				display = colData[ci].lines[lineIdx]
+			}
+
+			isCurrentCell := isCurrentRow && c == m.cursorCol
+			isCellMatch := m.isCellSearchMatch(row, c)
+
+			if isCurrentCell {
+				display = m.highlightSearchInText(display)
+				b.WriteString(stCursor.Render(display))
+			} else if isCellMatch {
+				display = m.highlightSearchInText(display)
+				if isCurrentRow {
+					b.WriteString(stRowHL.Render(display))
+				} else {
+					b.WriteString(stMatchCell.Render(display))
+				}
+			} else if isCurrentRow {
+				b.WriteString(stRowHL.Render(display))
+			} else {
+				b.WriteString(stNormal.Render(display))
+			}
+		}
+		output[lineIdx] = b.String()
+	}
+
+	return output
+}
+
+func rangeSlice(start, end int) []int {
+	s := make([]int, end-start)
+	for i := range s {
+		s[i] = start + i
+	}
+	return s
+}
+
+func wrapText(text string, width, maxLines int) []string {
+	if width <= 0 {
+		return []string{""}
+	}
+	var lines []string
+	for len(text) > 0 && len(lines) < maxLines {
+		end := width
+		if end > len(text) {
+			end = len(text)
+		}
+		line := text[:end]
+		text = text[end:]
+
+		if len(lines) == maxLines-1 && len(text) > 0 {
+			// last allowed line and there's more text — add ellipsis
+			if len(line) > 1 {
+				line = line[:len(line)-1] + "…"
+			}
+		}
+
+		line = padOrTruncate(line, width)
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		lines = []string{strings.Repeat(" ", width)}
+	}
+	return lines
 }
 
 func (m *model) statusBar() string {
