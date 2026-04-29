@@ -79,16 +79,17 @@ func main() {
 	)
 
 	client := kusto.NewClient(clusterURL, db, token)
-	result, err := client.QueryContext(ctx, kql)
+	store, err := client.QueryContext(ctx, kql)
 	if err != nil {
 		logging.Error(ctx, "query failed", logging.String("error", err.Error()))
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	defer store.Close()
 
 	logging.Info(ctx, "query returned",
-		logging.Int("columns", len(result.Columns)),
-		logging.Int("rows", len(result.Rows)),
+		logging.Int("columns", len(store.Columns())),
+		logging.Int("rows", store.RowCount()),
 	)
 
 	w := os.Stdout
@@ -97,7 +98,7 @@ func main() {
 	case "table":
 		opts := render.DefaultOptions()
 		opts.MaxRows = *maxRows
-		render.Table(w, result, opts)
+		render.Table(w, store, opts)
 
 	case "log":
 		opts := render.DefaultLogOptions()
@@ -108,23 +109,23 @@ func main() {
 		if *extraCols != "" {
 			opts.ExtraColumns = strings.Split(*extraCols, ",")
 		}
-		render.Log(w, result, opts)
+		render.Log(w, store, opts)
 
 	case "json":
-		render.JSON(w, result)
+		render.JSON(w, store)
 
 	case "tui":
 		tuiOpts := render.DefaultTUIOptions()
 		if *tuiCols != "" {
 			tuiOpts.Columns = strings.Split(*tuiCols, ",")
 		}
-		render.TUI(result, tuiOpts)
+		render.TUI(store, tuiOpts)
 
 	case "raw":
 		opts := render.DefaultOptions()
 		opts.MaxColWidth = 0
 		opts.MaxRows = *maxRows
-		render.Table(w, result, opts)
+		render.Table(w, store, opts)
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown format: %s\n", *format)

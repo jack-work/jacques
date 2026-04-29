@@ -28,19 +28,20 @@ func DefaultLogOptions() LogOptions {
 	}
 }
 
-func Log(w io.Writer, result *data.Result, opts LogOptions) {
-	if result == nil || len(result.Rows) == 0 {
+func Log(w io.Writer, store data.RowStore, opts LogOptions) {
+	cols := store.Columns()
+	if store.RowCount() == 0 {
 		fmt.Fprintln(w, "(no results)")
 		return
 	}
 
 	colIdx := make(map[string]int)
-	for i, c := range result.Columns {
+	for i, c := range cols {
 		colIdx[c.Name] = i
 	}
 
 	if opts.ShowAllCols {
-		logAllColumns(w, result, colIdx, opts)
+		logAllColumns(w, store, cols, colIdx, opts)
 		return
 	}
 
@@ -55,7 +56,8 @@ func Log(w io.Writer, result *data.Result, opts LogOptions) {
 		}
 	}
 
-	for _, row := range result.Rows {
+	for r := 0; r < store.RowCount(); r++ {
+		row, _ := store.Row(r)
 		var parts []string
 
 		if hasTime {
@@ -65,7 +67,7 @@ func Log(w io.Writer, result *data.Result, opts LogOptions) {
 			parts = append(parts, formatLevel(row[levelIdx]))
 		}
 		for _, idx := range extraIdxs {
-			parts = append(parts, fmt.Sprintf("[%s=%v]", result.Columns[idx].Name, row[idx]))
+			parts = append(parts, fmt.Sprintf("[%s=%v]", cols[idx].Name, row[idx]))
 		}
 		if hasMsg {
 			parts = append(parts, toString(row[msgIdx]))
@@ -74,15 +76,16 @@ func Log(w io.Writer, result *data.Result, opts LogOptions) {
 		fmt.Fprintln(w, strings.Join(parts, " "))
 	}
 
-	fmt.Fprintf(w, "\n(%d log entries)\n", len(result.Rows))
+	fmt.Fprintf(w, "\n(%d log entries)\n", store.RowCount())
 }
 
-func logAllColumns(w io.Writer, result *data.Result, colIdx map[string]int, opts LogOptions) {
-	for i, row := range result.Rows {
+func logAllColumns(w io.Writer, store data.RowStore, cols []data.Column, colIdx map[string]int, opts LogOptions) {
+	for i := 0; i < store.RowCount(); i++ {
 		if i > 0 {
 			fmt.Fprintln(w, "---")
 		}
-		for j, col := range result.Columns {
+		row, _ := store.Row(i)
+		for j, col := range cols {
 			val := ""
 			if j < len(row) {
 				val = toString(row[j])
@@ -93,7 +96,7 @@ func logAllColumns(w io.Writer, result *data.Result, colIdx map[string]int, opts
 			fmt.Fprintf(w, "  %s: %s\n", col.Name, val)
 		}
 	}
-	fmt.Fprintf(w, "\n(%d log entries)\n", len(result.Rows))
+	fmt.Fprintf(w, "\n(%d log entries)\n", store.RowCount())
 }
 
 func formatTime(val interface{}, format string) string {

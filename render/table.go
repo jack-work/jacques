@@ -25,27 +25,29 @@ func DefaultOptions() TableOptions {
 	}
 }
 
-func Table(w io.Writer, result *data.Result, opts TableOptions) {
-	if result == nil || len(result.Columns) == 0 {
+func Table(w io.Writer, store data.RowStore, opts TableOptions) {
+	cols := store.Columns()
+	if len(cols) == 0 {
 		fmt.Fprintln(w, "(no results)")
 		return
 	}
 
-	rows := result.Rows
-	if opts.MaxRows > 0 && len(rows) > opts.MaxRows {
-		rows = rows[:opts.MaxRows]
+	rowCount := store.RowCount()
+	if opts.MaxRows > 0 && rowCount > opts.MaxRows {
+		rowCount = opts.MaxRows
 	}
 
-	headers := make([]string, len(result.Columns))
-	colTypes := make([]string, len(result.Columns))
-	for i, c := range result.Columns {
+	headers := make([]string, len(cols))
+	colTypes := make([]string, len(cols))
+	for i, c := range cols {
 		headers[i] = c.Name
 		colTypes[i] = c.Type
 	}
 
-	cells := make([][]string, len(rows))
-	for r, row := range rows {
-		cells[r] = make([]string, len(result.Columns))
+	cells := make([][]string, rowCount)
+	for r := 0; r < rowCount; r++ {
+		row, _ := store.Row(r)
+		cells[r] = make([]string, len(cols))
 		for c, val := range row {
 			cells[r][c] = formatValue(val, colTypes[c], opts)
 		}
@@ -59,7 +61,7 @@ func Table(w io.Writer, result *data.Result, opts TableOptions) {
 		writeRow(w, row, widths)
 	}
 
-	fmt.Fprintf(w, "\n(%d rows)\n", len(rows))
+	fmt.Fprintf(w, "\n(%d rows)\n", rowCount)
 }
 
 func formatValue(val interface{}, colType string, opts TableOptions) string {

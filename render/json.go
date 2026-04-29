@@ -8,16 +8,18 @@ import (
 	"github.com/jokellih/jacques/data"
 )
 
-func JSON(w io.Writer, result *data.Result) {
-	if result == nil || len(result.Rows) == 0 {
+func JSON(w io.Writer, store data.RowStore) {
+	cols := store.Columns()
+	if store.RowCount() == 0 {
 		fmt.Fprintln(w, "[]")
 		return
 	}
 
-	records := make([]map[string]interface{}, len(result.Rows))
-	for i, row := range result.Rows {
-		record := make(map[string]interface{}, len(result.Columns))
-		for j, col := range result.Columns {
+	records := make([]map[string]interface{}, store.RowCount())
+	for i := 0; i < store.RowCount(); i++ {
+		row, _ := store.Row(i)
+		record := make(map[string]interface{}, len(cols))
+		for j, col := range cols {
 			if j < len(row) {
 				record[col.Name] = row[j]
 			}

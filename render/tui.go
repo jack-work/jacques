@@ -26,20 +26,21 @@ func DefaultTUIOptions() TUIOptions {
 	}
 }
 
-func TUI(result *data.Result, opts TUIOptions) {
+func TUI(store data.RowStore, opts TUIOptions) {
 	ctx := context.Background()
 
-	if result == nil || len(result.Columns) == 0 {
-		logging.Warn(ctx, "TUI received nil or empty result")
+	cols := store.Columns()
+	if len(cols) == 0 {
+		logging.Warn(ctx, "TUI received empty result")
 		fmt.Fprintln(os.Stderr, "(no results)")
 		return
 	}
 
-	filtered := filterColumns(result, opts.Columns)
+	filtered := filterColumns(store, opts.Columns)
 	termWidth, termHeight := getTerminalSize()
 	logging.Info(ctx, "TUI starting",
-		logging.Int("columns", len(filtered.Columns)),
-		logging.Int("rows", len(filtered.Rows)),
+		logging.Int("columns", len(filtered.Columns())),
+		logging.Int("rows", filtered.RowCount()),
 		logging.Int("term_width", termWidth),
 		logging.Int("term_height", termHeight),
 	)
@@ -47,7 +48,7 @@ func TUI(result *data.Result, opts TUIOptions) {
 	cells := buildCells(filtered, opts)
 
 	m := &model{
-		result:     result,
+		store:      store,
 		filtered:   filtered,
 		cells:      cells,
 		opts:       opts,
@@ -81,9 +82,9 @@ type searchMatch struct {
 }
 
 type model struct {
-	result   *data.Result // original (all columns) for detail view
-	filtered *data.Result // column-filtered for table
-	cells    [][]string         // pre-formatted cell strings
+	store    data.RowStore // original (all columns) for detail view
+	filtered data.RowStore // column-filtered for table
+	cells    [][]string    // pre-formatted cell strings
 
 	opts       TUIOptions
 	termWidth  int
@@ -158,7 +159,7 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 	numRows := len(m.cells)
-	numCols := len(m.filtered.Columns)
+	numCols := len(m.filtered.Columns())
 	vr := m.viewRows()
 
 	switch key {
@@ -390,7 +391,7 @@ func (m *model) visibleColRange() int {
 	w := m.termWidth - 2
 	count := 0
 	used := 0
-	for c := m.scrollCol; c < len(m.filtered.Columns); c++ {
+	for c := m.scrollCol; c < len(m.filtered.Columns()); c++ {
 		cw := m.displayWidth(c)
 		if count > 0 {
 			cw += 3 // separator
@@ -460,8 +461,8 @@ func (m *model) viewTable() string {
 
 	colStart := m.scrollCol
 	colEnd := colStart + m.visibleColRange()
-	if colEnd > len(m.filtered.Columns) {
-		colEnd = len(m.filtered.Columns)
+	if colEnd > len(m.filtered.Columns()) {
+		colEnd = len(m.filtered.Columns())
 	}
 
 	// header
@@ -498,7 +499,7 @@ func (m *model) writeHeaderRow(b *strings.Builder, colStart, colEnd int) {
 			b.WriteString(stSep.Render(" │ "))
 		}
 		w := m.displayWidth(c)
-		title := m.filtered.Columns[c].Name
+		title := m.filtered.Columns()[c].Name
 		b.WriteString(stHeader.Render(padOrTruncate(title, w)))
 	}
 }
@@ -622,8 +623,8 @@ func (m *model) statusBar() string {
 	var parts []string
 	parts = append(parts, fmt.Sprintf("row %d/%d", m.cursorRow+1, len(m.cells)))
 	parts = append(parts, fmt.Sprintf("col %d/%d [%s]",
-		m.cursorCol+1, len(m.filtered.Columns),
-		m.filtered.Columns[m.cursorCol].Name))
+		m.cursorCol+1, len(m.filtered.Columns()),
+		m.filtered.Columns()[m.cursorCol].Name))
 
 	if len(m.searchMatches) > 0 {
 		parts = append(parts, fmt.Sprintf("/%s [%d/%d]", m.searchQuery, m.searchIdx+1, len(m.searchMatches)))
@@ -651,17 +652,18 @@ func (m *model) viewSearchPrompt() string {
 
 func (m *model) viewDetail() string {
 	idx := m.cursorRow
-	if idx < 0 || idx >= len(m.result.Rows) {
+	if idx < 0 || idx >= m.store.RowCount() {
 		return "No row selected"
 	}
 
-	row := m.result.Rows[idx]
+	row, _ := m.store.Row(idx)
+	allCols := m.store.Columns()
 	var b strings.Builder
 
-	b.WriteString(stTitle.Render(fmt.Sprintf(" Row %d/%d ", idx+1, len(m.result.Rows))))
+	b.WriteString(stTitle.Render(fmt.Sprintf(" Row %d/%d ", idx+1, m.store.RowCount())))
 	b.WriteString("\n\n")
 
-	for i, col := range m.result.Columns {
+	for i, col := range allCols {
 		val := ""
 		if i < len(row) {
 			val = formatValue(row[i], col.Type, DefaultOptions())
@@ -745,11 +747,12 @@ func getTerminalSize() (width, height int) {
 	return w, h
 }
 
-func filterColumns(result *data.Result, wanted []string) *data.Result {
+func filterColumns(store data.RowStore, wanted []string) data.RowStore {
 	if len(wanted) == 0 {
-		return result
+		return store
 	}
 
+	srcCols := store.Columns()
 	wantSet := make(map[string]int, len(wanted))
 	for i, name := range wanted {
 		wantSet[name] = i
@@ -760,7 +763,7 @@ func filterColumns(result *data.Result, wanted []string) *data.Result {
 		col            data.Column
 	}
 	var mappings []colMapping
-	for i, col := range result.Columns {
+	for i, col := range srcCols {
 		if dstIdx, ok := wantSet[col.Name]; ok {
 			mappings = append(mappings, colMapping{srcIdx: i, dstIdx: dstIdx, col: col})
 		}
@@ -771,8 +774,9 @@ func filterColumns(result *data.Result, wanted []string) *data.Result {
 		cols[mp.dstIdx] = mp.col
 	}
 
-	rows := make([][]interface{}, len(result.Rows))
-	for r, srcRow := range result.Rows {
+	rows := make([][]interface{}, store.RowCount())
+	for r := 0; r < store.RowCount(); r++ {
+		srcRow, _ := store.Row(r)
 		row := make([]interface{}, len(mappings))
 		for _, mp := range mappings {
 			if mp.srcIdx < len(srcRow) {
@@ -782,20 +786,22 @@ func filterColumns(result *data.Result, wanted []string) *data.Result {
 		rows[r] = row
 	}
 
-	return &data.Result{Columns: cols, Rows: rows}
+	return data.NewMemoryStore(cols, rows)
 }
 
-func buildCells(result *data.Result, opts TUIOptions) [][]string {
+func buildCells(store data.RowStore, opts TUIOptions) [][]string {
 	tableOpts := DefaultOptions()
 	tableOpts.TimeFormat = opts.TimeFormat
+	cols := store.Columns()
 
-	cells := make([][]string, len(result.Rows))
-	for r, row := range result.Rows {
-		cells[r] = make([]string, len(result.Columns))
+	cells := make([][]string, store.RowCount())
+	for r := 0; r < store.RowCount(); r++ {
+		row, _ := store.Row(r)
+		cells[r] = make([]string, len(cols))
 		for c, val := range row {
 			colType := ""
-			if c < len(result.Columns) {
-				colType = result.Columns[c].Type
+			if c < len(cols) {
+				colType = cols[c].Type
 			}
 			cells[r][c] = formatValue(val, colType, tableOpts)
 		}
@@ -803,9 +809,10 @@ func buildCells(result *data.Result, opts TUIOptions) [][]string {
 	return cells
 }
 
-func computeNaturalWidths(result *data.Result, cells [][]string) []int {
-	widths := make([]int, len(result.Columns))
-	for i, col := range result.Columns {
+func computeNaturalWidths(store data.RowStore, cells [][]string) []int {
+	cols := store.Columns()
+	widths := make([]int, len(cols))
+	for i, col := range cols {
 		widths[i] = len(col.Name)
 	}
 	for _, row := range cells {

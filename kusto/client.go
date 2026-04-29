@@ -65,11 +65,11 @@ type v2Column struct {
 
 var tracer = otel.Tracer("jacques/kusto")
 
-func (c *Client) Query(kql string) (*data.Result, error) {
+func (c *Client) Query(kql string) (data.RowStore, error) {
 	return c.QueryContext(context.Background(), kql)
 }
 
-func (c *Client) QueryContext(ctx context.Context, kql string) (*data.Result, error) {
+func (c *Client) QueryContext(ctx context.Context, kql string) (data.RowStore, error) {
 	ctx, span := tracer.Start(ctx, "kusto.Query")
 	defer span.End()
 
@@ -79,20 +79,20 @@ func (c *Client) QueryContext(ctx context.Context, kql string) (*data.Result, er
 		logging.String("kql", kql),
 	)
 
-	result, err := c.doQuery(ctx, kql)
+	store, err := c.doQuery(ctx, kql)
 	if err != nil {
 		logging.Error(ctx, "kusto query failed", logging.String("error", err.Error()))
 		return nil, err
 	}
 
 	logging.Info(ctx, "kusto query completed",
-		logging.Int("columns", len(result.Columns)),
-		logging.Int("rows", len(result.Rows)),
+		logging.Int("columns", len(store.Columns())),
+		logging.Int("rows", store.RowCount()),
 	)
-	return result, nil
+	return store, nil
 }
 
-func (c *Client) doQuery(ctx context.Context, kql string) (*data.Result, error) {
+func (c *Client) doQuery(ctx context.Context, kql string) (data.RowStore, error) {
 	body := queryRequest{
 		DB:  c.Database,
 		CSL: kql,
@@ -160,26 +160,26 @@ func (c *Client) doQuery(ctx context.Context, kql string) (*data.Result, error) 
 
 	for _, f := range frames {
 		if f.FrameType == "DataTable" && f.TableName == "PrimaryResult" {
-			return frameToResult(f), nil
+			return frameToStore(f), nil
 		}
 	}
 
 	for _, f := range frames {
 		if f.FrameType == "DataTable" && len(f.Rows) > 0 {
-			return frameToResult(f), nil
+			return frameToStore(f), nil
 		}
 	}
 
 	logging.Warn(ctx, "no DataTable with rows found in response")
-	return &data.Result{}, nil
+	return data.NewMemoryStore(nil, nil), nil
 }
 
-func frameToResult(f v2Frame) *data.Result {
+func frameToStore(f v2Frame) data.RowStore {
 	cols := make([]data.Column, len(f.Columns))
 	for i, c := range f.Columns {
 		cols[i] = data.Column{Name: c.ColumnName, Type: c.ColumnType}
 	}
-	return &data.Result{Columns: cols, Rows: f.Rows}
+	return data.NewMemoryStore(cols, f.Rows)
 }
 
 func truncate(s string, max int) string {
