@@ -58,10 +58,11 @@ func TUI(store data.RowStore, opts TUIOptions) {
 		termWidth:   termWidth,
 		termHeight:  termHeight,
 		colWidths:   computeNaturalWidths(filtered, cells),
-		tableDirty:  true,
+		tableDirty:  false,
 		detailDirty: true,
 		detailRow:   -1,
 	}
+	m.cachedTableView = m.renderTable()
 
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		logging.Error(ctx, "TUI program error", logging.String("error", err.Error()))
@@ -122,7 +123,7 @@ type model struct {
 func (m *model) Init() tea.Cmd { return nil }
 
 func (m *model) viewRows() int {
-	return m.termHeight - 4 // header + separator + status + border
+	return m.termHeight - 3 // header + separator + status bar
 }
 
 func (m *model) expandedLines() []string {
@@ -364,7 +365,7 @@ func (m *model) handleDetailKey(key string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc", "enter":
 		m.mode = modeTable
-		m.tableDirty = true
+		// table only dirty if cursor moved while in detail
 	case "j", "down":
 		if m.cursorRow < len(m.cells)-1 {
 			m.cursorRow++
@@ -377,14 +378,49 @@ func (m *model) handleDetailKey(key string) (tea.Model, tea.Cmd) {
 			m.detailDirty = true
 			m.tableDirty = true
 		}
+	case "y":
+		m.yankDetailValue()
 	case "n":
 		m.nextMatch(1)
 		m.detailDirty = true
+		m.tableDirty = true
 	case "N":
 		m.nextMatch(-1)
 		m.detailDirty = true
+		m.tableDirty = true
 	}
 	return m, nil
+}
+
+func (m *model) yankDetailValue() {
+	if m.cursorRow < 0 || m.cursorRow >= m.store.RowCount() {
+		return
+	}
+	row, err := m.store.Row(m.cursorRow)
+	if err != nil {
+		return
+	}
+	// Yank the full row as key: value pairs
+	allCols := m.store.Columns()
+	var parts []string
+	for i, col := range allCols {
+		if i >= len(row) || row[i] == nil {
+			continue
+		}
+		var val string
+		if isJSONValue(row[i]) {
+			val = prettyJSON(row[i])
+		} else {
+			val = formatValue(row[i], col.Type, DefaultOptions())
+		}
+		if val != "" {
+			parts = append(parts, fmt.Sprintf("%s: %s", col.Name, val))
+		}
+	}
+	text := strings.Join(parts, "\n")
+	m.yankText = text
+	copyToClipboard(text)
+	m.detailDirty = true
 }
 
 func (m *model) handleSearchInput(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -636,9 +672,14 @@ func (m *model) renderTable() string {
 		}
 	}
 
+	// fill remaining lines to prevent leftover content from previous frame
+	for linesUsed < vr {
+		b.WriteByte('\n')
+		linesUsed++
+	}
+
 	// status bar
 	b.WriteString(m.statusBar())
-	b.WriteByte('\n')
 
 	return b.String()
 }
@@ -832,8 +873,13 @@ func (m *model) renderDetail() string {
 		}
 	}
 
+	linesUsed := 0
+
 	b.WriteString(ansiWrap(ansiTitleBar, fmt.Sprintf(" Row %d/%d ", idx+1, m.store.RowCount())))
-	b.WriteString("\n\n")
+	b.WriteByte('\n')
+	linesUsed++
+	b.WriteByte('\n')
+	linesUsed++
 
 	detailOpts := DefaultOptions()
 	detailOpts.MaxColWidth = 0
@@ -859,7 +905,6 @@ func (m *model) renderDetail() string {
 		b.WriteByte(' ')
 
 		if strings.Contains(val, "\n") {
-			// Multi-line (pretty JSON): indent continuation lines
 			lines := strings.Split(val, "\n")
 			for li, line := range lines {
 				if m.searchQuery != "" {
@@ -869,6 +914,7 @@ func (m *model) renderDetail() string {
 					b.WriteString(ansiWrap(ansiDetailVal, line))
 				} else {
 					b.WriteByte('\n')
+					linesUsed++
 					b.WriteString(strings.Repeat(" ", maxKeyLen+4))
 					b.WriteString(ansiWrap(ansiDetailVal, line))
 				}
@@ -880,19 +926,31 @@ func (m *model) renderDetail() string {
 			b.WriteString(ansiWrap(ansiDetailVal, val))
 		}
 		b.WriteByte('\n')
+		linesUsed++
 	}
 
-	b.WriteString("\n")
+	// pad to fill screen
+	for linesUsed < m.termHeight-1 {
+		b.WriteByte('\n')
+		linesUsed++
+	}
+
 	var help []string
 	help = append(help, "esc/enter: back")
 	help = append(help, "j/k: prev/next row")
 	if len(m.searchMatches) > 0 {
 		help = append(help, fmt.Sprintf("n/N: search [%d/%d]", m.searchIdx+1, len(m.searchMatches)))
 	}
-	help = append(help, "y: yank value")
+	if m.yankText != "" {
+		yanked := m.yankText
+		if len(yanked) > 30 {
+			yanked = yanked[:29] + "…"
+		}
+		help = append(help, fmt.Sprintf("yanked: %q", yanked))
+	}
+	help = append(help, "y: yank row")
 	help = append(help, "q: quit")
 	b.WriteString(ansiWrap(ansiHelp, "  "+strings.Join(help, "  ")))
-	b.WriteByte('\n')
 
 	return b.String()
 }
