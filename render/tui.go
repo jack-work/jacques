@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+
 	"github.com/jokellih/jacques/data"
 	"github.com/jokellih/jacques/logging"
 	"golang.org/x/term"
@@ -51,13 +51,16 @@ func TUI(store data.RowStore, opts TUIOptions) {
 	cells := buildCells(filtered, opts)
 
 	m := &model{
-		store:      store,
-		filtered:   filtered,
-		cells:      cells,
-		opts:       opts,
-		termWidth:  termWidth,
-		termHeight: termHeight,
-		colWidths:  computeNaturalWidths(filtered, cells),
+		store:       store,
+		filtered:    filtered,
+		cells:       cells,
+		opts:        opts,
+		termWidth:   termWidth,
+		termHeight:  termHeight,
+		colWidths:   computeNaturalWidths(filtered, cells),
+		tableDirty:  true,
+		detailDirty: true,
+		detailRow:   -1,
 	}
 
 	if _, err := tea.NewProgram(m).Run(); err != nil {
@@ -107,6 +110,13 @@ type model struct {
 	searchIdx     int
 
 	yankText string
+
+	// render cache
+	cachedTableView  string
+	cachedDetailView string
+	tableDirty       bool
+	detailDirty      bool
+	detailRow        int // which row the cached detail is for
 }
 
 func (m *model) Init() tea.Cmd { return nil }
@@ -205,6 +215,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.termWidth = msg.Width
 		m.termHeight = msg.Height
+		m.tableDirty = true
+		m.detailDirty = true
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -342,6 +354,7 @@ func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 	}
 
 	m.clampScroll()
+	m.tableDirty = true
 	return m, nil
 }
 
@@ -351,18 +364,25 @@ func (m *model) handleDetailKey(key string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc", "enter":
 		m.mode = modeTable
+		m.tableDirty = true
 	case "j", "down":
 		if m.cursorRow < len(m.cells)-1 {
 			m.cursorRow++
+			m.detailDirty = true
+			m.tableDirty = true
 		}
 	case "k", "up":
 		if m.cursorRow > 0 {
 			m.cursorRow--
+			m.detailDirty = true
+			m.tableDirty = true
 		}
 	case "n":
 		m.nextMatch(1)
+		m.detailDirty = true
 	case "N":
 		m.nextMatch(-1)
+		m.detailDirty = true
 	}
 	return m, nil
 }
@@ -554,13 +574,7 @@ const (
 	ansiHelp      = "\x1b[38;5;241m"    // fg 241
 )
 
-// lipgloss styles only for complex rendering (detail view, title bar)
-var (
-	stDetailKey = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
-	stDetailVal = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	stTitle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("229")).Background(lipgloss.Color("57")).Padding(0, 1)
-	stHelp      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-)
+
 
 func ansiWrap(code, text string) string {
 	return code + text + ansiReset
@@ -571,16 +585,28 @@ func (m *model) View() tea.View {
 	v.AltScreen = true
 	switch m.mode {
 	case modeDetail:
-		v.SetContent(m.viewDetail())
+		if m.detailDirty || m.detailRow != m.cursorRow {
+			m.cachedDetailView = m.renderDetail()
+			m.detailDirty = false
+			m.detailRow = m.cursorRow
+		}
+		v.SetContent(m.cachedDetailView)
 	case modeSearch:
-		v.SetContent(m.viewTable() + m.viewSearchPrompt())
+		// always re-render during active search input
+		m.cachedTableView = m.renderTable()
+		v.SetContent(m.cachedTableView + m.viewSearchPrompt())
+		m.tableDirty = false
 	default:
-		v.SetContent(m.viewTable())
+		if m.tableDirty {
+			m.cachedTableView = m.renderTable()
+			m.tableDirty = false
+		}
+		v.SetContent(m.cachedTableView)
 	}
 	return v
 }
 
-func (m *model) viewTable() string {
+func (m *model) renderTable() string {
 	var b strings.Builder
 
 	colStart := m.scrollCol
@@ -764,25 +790,31 @@ func (m *model) statusBar() string {
 		parts = append(parts, fmt.Sprintf("yanked: %q", yanked))
 	}
 
-	left := stHelp.Render(strings.Join(parts, "  "))
-	right := stHelp.Render("hjkl:move  space:expand  y:yank  enter:detail  /:search  q:quit")
+	left := strings.Join(parts, "  ")
+	right := "hjkl:move  space:expand  y:yank  enter:detail  /:search  q:quit"
 
-	gap := m.termWidth - lipgloss.Width(left) - lipgloss.Width(right)
+	gap := m.termWidth - len(left) - len(right)
 	if gap < 2 {
-		return left
+		return ansiWrap(ansiHelp, left)
 	}
-	return left + strings.Repeat(" ", gap) + right
+	return ansiWrap(ansiHelp, left+strings.Repeat(" ", gap)+right)
 }
 
 func (m *model) viewSearchPrompt() string {
-	return "\n" + stHelp.Render("/") + m.searchQuery + "█"
+	return "\n" + ansiWrap(ansiHelp, "/") + m.searchQuery + "█"
 }
 
 // ---------------------------------------------------------------------------
 // detail view
 // ---------------------------------------------------------------------------
 
-func (m *model) viewDetail() string {
+const (
+	ansiDetailKey   = "\x1b[1;38;5;39m"  // bold fg 39
+	ansiDetailVal   = "\x1b[38;5;252m"   // fg 252
+	ansiTitleBar    = "\x1b[1;38;5;229;48;5;57m" // bold fg 229 bg 57
+)
+
+func (m *model) renderDetail() string {
 	idx := m.cursorRow
 	if idx < 0 || idx >= m.store.RowCount() {
 		return "No row selected"
@@ -792,36 +824,74 @@ func (m *model) viewDetail() string {
 	allCols := m.store.Columns()
 	var b strings.Builder
 
-	b.WriteString(stTitle.Render(fmt.Sprintf(" Row %d/%d ", idx+1, m.store.RowCount())))
+	// Pre-compute max key width for alignment
+	maxKeyLen := 0
+	for _, col := range allCols {
+		if len(col.Name) > maxKeyLen {
+			maxKeyLen = len(col.Name)
+		}
+	}
+
+	b.WriteString(ansiWrap(ansiTitleBar, fmt.Sprintf(" Row %d/%d ", idx+1, m.store.RowCount())))
 	b.WriteString("\n\n")
 
+	detailOpts := DefaultOptions()
+	detailOpts.MaxColWidth = 0
 	for i, col := range allCols {
-		val := ""
-		if i < len(row) {
-			val = formatValue(row[i], col.Type, DefaultOptions())
+		if i >= len(row) {
+			continue
+		}
+
+		raw := row[i]
+		var val string
+		if isJSONValue(raw) {
+			val = prettyJSON(raw)
+		} else {
+			val = formatValue(raw, col.Type, detailOpts)
 		}
 		if val == "" {
 			continue
 		}
 
-		key := stDetailKey.Render(fmt.Sprintf("%s:", col.Name))
-		if m.searchQuery != "" {
-			val = m.highlightSearchInText(val)
+		key := fmt.Sprintf("%-*s:", maxKeyLen, col.Name)
+		b.WriteString("  ")
+		b.WriteString(ansiWrap(ansiDetailKey, key))
+		b.WriteByte(' ')
+
+		if strings.Contains(val, "\n") {
+			// Multi-line (pretty JSON): indent continuation lines
+			lines := strings.Split(val, "\n")
+			for li, line := range lines {
+				if m.searchQuery != "" {
+					line = m.highlightSearchANSI(line)
+				}
+				if li == 0 {
+					b.WriteString(ansiWrap(ansiDetailVal, line))
+				} else {
+					b.WriteByte('\n')
+					b.WriteString(strings.Repeat(" ", maxKeyLen+4))
+					b.WriteString(ansiWrap(ansiDetailVal, line))
+				}
+			}
+		} else {
+			if m.searchQuery != "" {
+				val = m.highlightSearchANSI(val)
+			}
+			b.WriteString(ansiWrap(ansiDetailVal, val))
 		}
-		value := stDetailVal.Render(val)
-		b.WriteString(fmt.Sprintf("  %s %s\n", key, value))
+		b.WriteByte('\n')
 	}
 
 	b.WriteString("\n")
-
 	var help []string
 	help = append(help, "esc/enter: back")
 	help = append(help, "j/k: prev/next row")
 	if len(m.searchMatches) > 0 {
 		help = append(help, fmt.Sprintf("n/N: search [%d/%d]", m.searchIdx+1, len(m.searchMatches)))
 	}
+	help = append(help, "y: yank value")
 	help = append(help, "q: quit")
-	b.WriteString(stHelp.Render("  " + strings.Join(help, "  ")))
+	b.WriteString(ansiWrap(ansiHelp, "  "+strings.Join(help, "  ")))
 	b.WriteByte('\n')
 
 	return b.String()
