@@ -541,29 +541,43 @@ func (m *model) displayWidth(col int) int {
 // view
 // ---------------------------------------------------------------------------
 
+// ANSI escape sequences for fast cell rendering (avoid lipgloss.Render per cell)
+const (
+	ansiReset     = "\x1b[0m"
+	ansiHeader    = "\x1b[1;38;5;39m"   // bold + fg 39
+	ansiSep       = "\x1b[38;5;238m"    // fg 238
+	ansiNormal    = "\x1b[38;5;252m"    // fg 252
+	ansiCursor    = "\x1b[38;5;229;48;5;57m" // fg 229 bg 57
+	ansiRowHL     = "\x1b[38;5;229;48;5;236m" // fg 229 bg 236
+	ansiSearchHL  = "\x1b[1;38;5;0;48;5;220m" // bold fg 0 bg 220
+	ansiMatchCell = "\x1b[38;5;220m"    // fg 220
+	ansiHelp      = "\x1b[38;5;241m"    // fg 241
+)
+
+// lipgloss styles only for complex rendering (detail view, title bar)
 var (
-	stHeader    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	stSep       = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	stNormal    = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	stCursor    = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("57"))
-	stRowHL     = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("236"))
-	stSearchHL  = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("220")).Bold(true)
-	stMatchCell = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-	stHelp      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	stDetailKey = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
 	stDetailVal = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	stTitle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("229")).Background(lipgloss.Color("57")).Padding(0, 1)
+	stHelp      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 )
 
+func ansiWrap(code, text string) string {
+	return code + text + ansiReset
+}
+
 func (m *model) View() tea.View {
+	var v tea.View
+	v.AltScreen = true
 	switch m.mode {
 	case modeDetail:
-		return tea.NewView(m.viewDetail())
+		v.SetContent(m.viewDetail())
 	case modeSearch:
-		return tea.NewView(m.viewTable() + m.viewSearchPrompt())
+		v.SetContent(m.viewTable() + m.viewSearchPrompt())
 	default:
-		return tea.NewView(m.viewTable())
+		v.SetContent(m.viewTable())
 	}
+	return v
 }
 
 func (m *model) viewTable() string {
@@ -606,21 +620,21 @@ func (m *model) viewTable() string {
 func (m *model) writeHeaderRow(b *strings.Builder, colStart, colEnd int) {
 	for c := colStart; c < colEnd; c++ {
 		if c > colStart {
-			b.WriteString(stSep.Render(" │ "))
+			b.WriteString(ansiWrap(ansiSep, " │ "))
 		}
 		w := m.displayWidth(c)
 		title := m.filtered.Columns()[c].Name
-		b.WriteString(stHeader.Render(padOrTruncate(title, w)))
+		b.WriteString(ansiWrap(ansiHeader, padOrTruncate(title, w)))
 	}
 }
 
 func (m *model) writeSeparator(b *strings.Builder, colStart, colEnd int) {
 	for c := colStart; c < colEnd; c++ {
 		if c > colStart {
-			b.WriteString(stSep.Render("─┼─"))
+			b.WriteString(ansiWrap(ansiSep, "─┼─"))
 		}
 		w := m.displayWidth(c)
-		b.WriteString(stSep.Render(strings.Repeat("─", w)))
+		b.WriteString(ansiWrap(ansiSep, strings.Repeat("─", w)))
 	}
 }
 
@@ -659,7 +673,7 @@ func (m *model) renderDataRow(row, colStart, colEnd int) []string {
 		var b strings.Builder
 		for ci, c := range rangeSlice(colStart, colEnd) {
 			if ci > 0 {
-				b.WriteString(stSep.Render(" │ "))
+				b.WriteString(ansiWrap(ansiSep, " │ "))
 			}
 
 			display := strings.Repeat(" ", colData[ci].width)
@@ -671,19 +685,19 @@ func (m *model) renderDataRow(row, colStart, colEnd int) []string {
 			isCellMatch := m.isCellSearchMatch(row, c)
 
 			if isCurrentCell {
-				display = m.highlightSearchInText(display)
-				b.WriteString(stCursor.Render(display))
+				display = m.highlightSearchANSI(display)
+				b.WriteString(ansiWrap(ansiCursor, display))
 			} else if isCellMatch {
-				display = m.highlightSearchInText(display)
+				display = m.highlightSearchANSI(display)
 				if isCurrentRow {
-					b.WriteString(stRowHL.Render(display))
+					b.WriteString(ansiWrap(ansiRowHL, display))
 				} else {
-					b.WriteString(stMatchCell.Render(display))
+					b.WriteString(ansiWrap(ansiMatchCell, display))
 				}
 			} else if isCurrentRow {
-				b.WriteString(stRowHL.Render(display))
+				b.WriteString(ansiWrap(ansiRowHL, display))
 			} else {
-				b.WriteString(stNormal.Render(display))
+				b.WriteString(ansiWrap(ansiNormal, display))
 			}
 		}
 		output[lineIdx] = b.String()
@@ -830,6 +844,10 @@ func (m *model) isCellSearchMatch(row, col int) bool {
 }
 
 func (m *model) highlightSearchInText(text string) string {
+	return m.highlightSearchANSI(text)
+}
+
+func (m *model) highlightSearchANSI(text string) string {
 	if m.searchQuery == "" {
 		return text
 	}
@@ -844,7 +862,9 @@ func (m *model) highlightSearchInText(text string) string {
 	for idx >= 0 {
 		b.WriteString(text[:idx])
 		matchEnd := idx + len(m.searchQuery)
-		b.WriteString(stSearchHL.Render(text[idx:matchEnd]))
+		b.WriteString(ansiSearchHL)
+		b.WriteString(text[idx:matchEnd])
+		b.WriteString(ansiReset)
 		text = text[matchEnd:]
 		lower = lower[matchEnd:]
 		idx = strings.Index(lower, q)
