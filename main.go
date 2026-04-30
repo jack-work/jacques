@@ -24,6 +24,7 @@ func main() {
 	levelCol := flag.String("level-col", "level", "column name for log level in log mode")
 	extraCols := flag.String("extra-cols", "", "comma-separated extra columns to show in log mode")
 	tuiCols := flag.String("cols", "", "comma-separated columns to show in TUI mode (default: all)")
+	queryFile := flag.String("f", "", "read query from file")
 	flag.Parse()
 
 	loadEnv(".env")
@@ -56,20 +57,30 @@ func main() {
 		db = "CAPAnalytics"
 	}
 
-	kql := strings.Join(flag.Args(), " ")
-	if kql == "" {
-		fmt.Fprintln(os.Stderr, "usage: jacques [flags] <KQL query>")
-		fmt.Fprintln(os.Stderr, "       jacques [flags] @<file.kql>")
-		os.Exit(1)
-	}
-
-	if strings.HasPrefix(kql, "@") {
-		data, err := os.ReadFile(kql[1:])
+	var kql string
+	if *queryFile != "" {
+		qdata, err := os.ReadFile(*queryFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error reading query file: %v\n", err)
 			os.Exit(1)
 		}
-		kql = string(data)
+		kql = string(qdata)
+	} else {
+		kql = strings.Join(flag.Args(), " ")
+		if strings.HasPrefix(kql, "@") {
+			qdata, err := os.ReadFile(kql[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error reading query file: %v\n", err)
+				os.Exit(1)
+			}
+			kql = string(qdata)
+		}
+	}
+
+	if kql == "" {
+		fmt.Fprintln(os.Stderr, "usage: jacques [flags] <KQL query>")
+		fmt.Fprintln(os.Stderr, "       jacques -f <file.kql> [flags]")
+		os.Exit(1)
 	}
 
 	logging.Info(ctx, "query details",

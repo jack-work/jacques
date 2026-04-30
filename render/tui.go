@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -102,6 +104,8 @@ type model struct {
 	searchQuery   string
 	searchMatches []searchMatch
 	searchIdx     int
+
+	yankText string
 }
 
 func (m *model) Init() tea.Cmd { return nil }
@@ -177,6 +181,7 @@ func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 
 	// vertical movement
 	case "j", "down":
+		m.yankText = ""
 		if m.cursorRow < numRows-1 {
 			m.cursorRow++
 		}
@@ -235,6 +240,23 @@ func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 			m.expandedCol = -1
 		} else {
 			m.expandedCol = m.cursorCol
+		}
+
+	// yank
+	case "y":
+		cellText := ""
+		if m.cursorRow < len(m.cells) && m.cursorCol < len(m.cells[m.cursorRow]) {
+			cellText = m.cells[m.cursorRow][m.cursorCol]
+		}
+		m.yankText = cellText
+		copyToClipboard(cellText)
+	case "Y":
+		if m.cursorRow < len(m.cells) {
+			parts := make([]string, len(m.cells[m.cursorRow]))
+			copy(parts, m.cells[m.cursorRow])
+			text := strings.Join(parts, "\t")
+			m.yankText = text
+			copyToClipboard(text)
 		}
 
 	// search
@@ -632,8 +654,16 @@ func (m *model) statusBar() string {
 		parts = append(parts, fmt.Sprintf("/%s [no matches]", m.searchQuery))
 	}
 
+	if m.yankText != "" {
+		yanked := m.yankText
+		if len(yanked) > 40 {
+			yanked = yanked[:39] + "…"
+		}
+		parts = append(parts, fmt.Sprintf("yanked: %q", yanked))
+	}
+
 	left := stHelp.Render(strings.Join(parts, "  "))
-	right := stHelp.Render("hjkl:move  space:expand  enter:detail  /:search  n/N:next  q:quit")
+	right := stHelp.Render("hjkl:move  space:expand  y:yank  enter:detail  /:search  q:quit")
 
 	gap := m.termWidth - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 2 {
@@ -846,4 +876,18 @@ func truncateStr(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+func copyToClipboard(text string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("clip.exe")
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	default:
+		cmd = exec.Command("xclip", "-selection", "clipboard")
+	}
+	cmd.Stdin = strings.NewReader(text)
+	_ = cmd.Run()
 }
