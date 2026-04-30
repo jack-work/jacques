@@ -181,7 +181,7 @@ func main() {
 
 func handleConfig(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: jacques config <list|init|set-token|path>")
+		fmt.Fprintln(os.Stderr, "usage: jacques config <list|init|set|set-token|path>")
 		os.Exit(1)
 	}
 
@@ -230,6 +230,35 @@ func handleConfig(args []string) {
 		}
 		tw.Flush()
 
+	case "set":
+		if len(args) < 4 {
+			fmt.Fprintln(os.Stderr, "usage: jacques config set <connection-name> <field> <value>")
+			fmt.Fprintln(os.Stderr, "  fields: cluster, database, token, path")
+			fmt.Fprintln(os.Stderr, "  example: jacques config set cap-analytics cluster https://new.kusto.windows.net")
+			os.Exit(1)
+		}
+		connName := args[1]
+		field := args[2]
+		value := args[3]
+
+		validFields := map[string]bool{"cluster": true, "database": true, "token": true, "path": true}
+		if !validFields[field] {
+			fmt.Fprintf(os.Stderr, "error: unknown field %q (valid: cluster, database, token, path)\n", field)
+			os.Exit(1)
+		}
+
+		raw, err := os.ReadFile(config.Path())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error reading config: %v\n", err)
+			os.Exit(1)
+		}
+		updated := replaceFieldInConfig(string(raw), connName, field, value)
+		if err := os.WriteFile(config.Path(), []byte(updated), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("%s.%s updated in %s\n", connName, field, config.Path())
+
 	case "set-token":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: jacques config set-token <connection-name>")
@@ -267,7 +296,7 @@ func handleConfig(args []string) {
 			fmt.Fprintf(os.Stderr, "error reading config: %v\n", err)
 			os.Exit(1)
 		}
-		updated := replaceTokenInConfig(string(raw), connName, token)
+		updated := replaceFieldInConfig(string(raw), connName, "token", token)
 		if err := os.WriteFile(config.Path(), []byte(updated), 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing config: %v\n", err)
 			os.Exit(1)
@@ -276,14 +305,12 @@ func handleConfig(args []string) {
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown config command: %s\n", args[0])
-		fmt.Fprintln(os.Stderr, "usage: jacques config <list|init|set-token|path>")
+		fmt.Fprintln(os.Stderr, "usage: jacques config <list|init|set|set-token|path>")
 		os.Exit(1)
 	}
 }
 
-// replaceTokenInConfig finds the connection block by name and replaces its
-// token value. This is a simple text replacement — not a full HCL rewrite.
-func replaceTokenInConfig(content, connName, newToken string) string {
+func replaceFieldInConfig(content, connName, field, value string) string {
 	lines := strings.Split(content, "\n")
 	inTargetBlock := false
 	braceDepth := 0
@@ -311,9 +338,9 @@ func replaceTokenInConfig(content, connName, newToken string) string {
 				continue
 			}
 
-			if strings.HasPrefix(trimmed, "token") && strings.Contains(trimmed, "=") {
+			if strings.HasPrefix(trimmed, field) && strings.Contains(trimmed, "=") {
 				indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-				lines[i] = fmt.Sprintf("%stoken    = %q", indent, newToken)
+				lines[i] = fmt.Sprintf("%s%-8s = %q", indent, field, value)
 			}
 		}
 	}
