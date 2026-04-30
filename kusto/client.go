@@ -102,7 +102,7 @@ func (c *Client) doQuery(ctx context.Context, kql string) (data.RowStore, error)
 				QueryConsistency:    "strongconsistency",
 				QueryLanguage:       "kql",
 				RequestReadonly:     false,
-				RequestReadonlyHard: false,
+				RequestReadonlyHard: true,
 			},
 		},
 	}
