@@ -8,11 +8,14 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/jokellih/jacques/backend"
 	_ "github.com/jokellih/jacques/backend/csv"
 	_ "github.com/jokellih/jacques/backend/kusto"
+	"github.com/jokellih/jacques/cache"
 	"github.com/jokellih/jacques/config"
+	"github.com/jokellih/jacques/data"
 	"github.com/jokellih/jacques/logging"
 	"github.com/jokellih/jacques/render"
 )
@@ -20,6 +23,10 @@ import (
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "config" {
 		handleConfig(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "cache" {
+		handleCache(os.Args[2:])
 		return
 	}
 
@@ -36,6 +43,8 @@ func main() {
 	extraCols := queryCmd.String("extra-cols", "", "comma-separated extra columns to show in log mode")
 	tuiCols := queryCmd.String("cols", "", "comma-separated columns to show in TUI mode")
 	queryFile := queryCmd.String("f", "", "read query from file")
+	noCache := queryCmd.Bool("no-cache", false, "bypass cache, always query backend")
+	refresh := queryCmd.Bool("refresh", false, "ignore cached result, re-query and update cache")
 	queryCmd.Parse(os.Args[1:])
 
 	loadEnv(".env")
@@ -114,18 +123,39 @@ func main() {
 		logging.String("type", resolved.Type),
 	)
 
-	be, err := backend.New(resolved)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	// Check cache
+	useCache := !*noCache
+	var store data.RowStore
+	if useCache && !*refresh {
+		if cached, ok := cache.Get(ctx, resolved.Name, kql); ok {
+			store = cached
+			logging.Info(ctx, "serving from cache",
+				logging.Int("rows", store.RowCount()),
+			)
+		}
 	}
-	defer be.Close()
 
-	store, err := be.Query(ctx, kql)
-	if err != nil {
-		logging.Error(ctx, "query failed", logging.String("error", err.Error()))
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	// Cache miss — query backend
+	if store == nil {
+		be, err := backend.New(resolved)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		defer be.Close()
+
+		store, err = be.Query(ctx, kql)
+		if err != nil {
+			logging.Error(ctx, "query failed", logging.String("error", err.Error()))
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if useCache {
+			if err := cache.Put(ctx, resolved.Name, kql, store); err != nil {
+				logging.Warn(ctx, "failed to cache result", logging.String("error", err.Error()))
+			}
+		}
 	}
 	defer store.Close()
 
@@ -172,6 +202,71 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown format: %s\n", fmtStr)
 		os.Exit(1)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// cache subcommand
+// ---------------------------------------------------------------------------
+
+func handleCache(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: jacques cache <list|clear|path>")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "path":
+		fmt.Println(cache.Dir())
+
+	case "list":
+		entries, err := cache.List()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if len(entries) == 0 {
+			fmt.Fprintln(os.Stderr, "cache is empty")
+			return
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "CONN\tROWS\tCOLS\tSIZE\tAGE\tQUERY")
+		fmt.Fprintln(tw, "----\t----\t----\t----\t---\t-----")
+		for _, e := range entries {
+			age := time.Since(e.Timestamp).Truncate(time.Second)
+			query := e.Query
+			if len(query) > 60 {
+				query = query[:59] + "…"
+			}
+			query = strings.ReplaceAll(query, "\n", " ")
+			query = strings.ReplaceAll(query, "\r", "")
+			fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%s\t%s\n",
+				e.Conn, e.Rows, e.Cols, humanSize(e.SizeBytes), age, query)
+		}
+		tw.Flush()
+
+	case "clear":
+		if err := cache.Clear(); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("cache cleared")
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown cache command: %s\n", args[0])
+		fmt.Fprintln(os.Stderr, "usage: jacques cache <list|clear|path>")
+		os.Exit(1)
+	}
+}
+
+func humanSize(bytes int64) string {
+	switch {
+	case bytes >= 1<<20:
+		return fmt.Sprintf("%.1fMB", float64(bytes)/float64(1<<20))
+	case bytes >= 1<<10:
+		return fmt.Sprintf("%.1fKB", float64(bytes)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%dB", bytes)
 	}
 }
 
