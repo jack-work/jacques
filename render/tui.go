@@ -2,6 +2,7 @@ package render
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -114,24 +115,89 @@ func (m *model) viewRows() int {
 	return m.termHeight - 4 // header + separator + status + border
 }
 
-func (m *model) expandedRowHeight() int {
+func (m *model) expandedLines() []string {
 	if m.expandedCol < 0 {
-		return 1
+		return nil
 	}
+	w := m.displayWidth(m.expandedCol)
+	maxLines := m.viewRows() / 2
+	if maxLines < 3 {
+		maxLines = 3
+	}
+
+	raw := m.expandedRawValue()
+	if isJSONValue(raw) {
+		pretty := formatJSONPretty(raw)
+		lines := strings.SplitN(pretty, "\n", maxLines+1)
+		if len(lines) > maxLines {
+			lines = lines[:maxLines]
+			lines[maxLines-1] = padOrTruncate(lines[maxLines-1]+"…", w)
+		}
+		for i, line := range lines {
+			lines[i] = padOrTruncate(line, w)
+		}
+		return lines
+	}
+
 	cellText := ""
 	if m.cursorRow < len(m.cells) && m.expandedCol < len(m.cells[m.cursorRow]) {
 		cellText = m.cells[m.cursorRow][m.expandedCol]
 	}
-	w := m.displayWidth(m.expandedCol)
-	if w <= 0 || len(cellText) <= w {
+	return wrapText(cellText, w, maxLines)
+}
+
+func (m *model) expandedRowHeight() int {
+	lines := m.expandedLines()
+	if len(lines) == 0 {
 		return 1
 	}
-	lines := (len(cellText) + w - 1) / w
-	maxLines := m.viewRows() / 2
-	if lines > maxLines {
-		lines = maxLines
+	return len(lines)
+}
+
+func (m *model) expandedRawValue() interface{} {
+	if m.expandedCol < 0 || m.cursorRow < 0 {
+		return nil
 	}
-	return lines
+	row, err := m.filtered.Row(m.cursorRow)
+	if err != nil || m.expandedCol >= len(row) {
+		return nil
+	}
+	return row[m.expandedCol]
+}
+
+func isJSONValue(v interface{}) bool {
+	switch v.(type) {
+	case map[string]interface{}, []interface{}:
+		return true
+	}
+	if s, ok := v.(string); ok {
+		s = strings.TrimSpace(s)
+		return (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) ||
+			(strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]"))
+	}
+	return false
+}
+
+func prettyJSON(v interface{}) string {
+	switch t := v.(type) {
+	case map[string]interface{}, []interface{}:
+		b, err := json.MarshalIndent(t, "", "  ")
+		if err != nil {
+			return fmt.Sprintf("%v", v)
+		}
+		return string(b)
+	case string:
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(t), &parsed); err == nil {
+			b, err := json.MarshalIndent(parsed, "", "  ")
+			if err == nil {
+				return string(b)
+			}
+		}
+		return t
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -244,8 +310,14 @@ func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 
 	// yank
 	case "y":
-		cellText := ""
-		if m.cursorRow < len(m.cells) && m.cursorCol < len(m.cells[m.cursorRow]) {
+		var cellText string
+		if m.expandedCol >= 0 && m.expandedCol == m.cursorCol {
+			raw := m.expandedRawValue()
+			if isJSONValue(raw) {
+				cellText = prettyJSON(raw)
+			}
+		}
+		if cellText == "" && m.cursorRow < len(m.cells) && m.cursorCol < len(m.cells[m.cursorRow]) {
 			cellText = m.cells[m.cursorRow][m.cursorCol]
 		}
 		m.yankText = cellText
@@ -330,6 +402,22 @@ func (m *model) runSearch() {
 		return
 	}
 	q := strings.ToLower(m.searchQuery)
+
+	if m.expandedCol >= 0 {
+		// Search only within the expanded cell's full content (including pretty JSON)
+		raw := m.expandedRawValue()
+		var searchText string
+		if isJSONValue(raw) {
+			searchText = prettyJSON(raw)
+		} else if m.cursorRow < len(m.cells) && m.expandedCol < len(m.cells[m.cursorRow]) {
+			searchText = m.cells[m.cursorRow][m.expandedCol]
+		}
+		if strings.Contains(strings.ToLower(searchText), q) {
+			m.searchMatches = append(m.searchMatches, searchMatch{m.cursorRow, m.expandedCol})
+		}
+		return
+	}
+
 	for r, row := range m.cells {
 		for c, cell := range row {
 			if strings.Contains(strings.ToLower(cell), q) {
@@ -560,7 +648,7 @@ func (m *model) renderDataRow(row, colStart, colEnd int) []string {
 		}
 
 		if isExpanded && c == m.expandedCol {
-			colData[ci] = colLines{wrapText(cellText, w, numLines), w}
+			colData[ci] = colLines{m.expandedLines(), w}
 		} else {
 			colData[ci] = colLines{[]string{padOrTruncate(cellText, w)}, w}
 		}

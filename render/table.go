@@ -1,6 +1,7 @@
 package render
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -103,26 +104,27 @@ func formatValue(val interface{}, colType string, opts TableOptions) string {
 		}
 	}
 
+	switch val.(type) {
+	case map[string]interface{}, []interface{}:
+		return formatJSON(val)
+	}
 	return fmt.Sprintf("%v", val)
 }
 
 func formatJSON(v interface{}) string {
-	switch t := v.(type) {
-	case map[string]interface{}:
-		parts := make([]string, 0, len(t))
-		for k, val := range t {
-			parts = append(parts, fmt.Sprintf("%s=%v", k, val))
-		}
-		return "{" + strings.Join(parts, ", ") + "}"
-	case []interface{}:
-		parts := make([]string, len(t))
-		for i, val := range t {
-			parts[i] = fmt.Sprintf("%v", val)
-		}
-		return "[" + strings.Join(parts, ", ") + "]"
-	default:
+	b, err := json.Marshal(v)
+	if err != nil {
 		return fmt.Sprintf("%v", v)
 	}
+	return string(b)
+}
+
+func formatJSONPretty(v interface{}) string {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
 }
 
 func computeWidths(headers []string, cells [][]string, maxWidth int) []int {
