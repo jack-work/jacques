@@ -1,0 +1,211 @@
+let _serviceGroup = '';
+let _serviceName = 'Power Apps Orchard';
+let _resourceGroupFilter = '';
+let _resourceNameFilter = '';
+let _subscriptionId = dynamic(null);
+// baseQuery All Detailed AccessLog
+let ['All Detailed AccessLog'] = () {
+    let SnapshotDateTime = now();
+    let ActionItemSubtype = 'Wave8';
+    let param_assetType = '';
+    let param_cloud = '';
+    let param_division_all = '';
+    let param_org_all = 'Business and Industry Copilot';
+    let param_s360id = '';
+    let param_service_all = _serviceName;
+    let param_servicegroup_all = _serviceGroup;
+    let param_wave = '';
+    let allResources = cluster('nspkpis.centralus').database('SecurePaaSResources').GetSecurePaaSResourcesDetails(
+     resourceType=param_assetType,
+     s360id=param_s360id,
+     divisionName=param_division_all,
+     organizationName = param_org_all,
+     serviceGroupName = param_servicegroup_all,
+     serviceName=param_service_all,
+     cloud=param_cloud,
+     wave= param_wave);
+    allResources
+    | extend AssessmentState = iff(ResourceGroup startswith 'cloud-shell-storage-' or 
+                            ResourceGroup startswith 'genevawarmpathmanage' or
+                            ResourceGroup startswith 'databricks-' or
+                            ResourceGroup startswith 'paycopilot-' , 'Excluded_GenericStorage', AssessmentState)
+    | where AssessmentState !contains "Excluded_" or AssessmentState == "Excluded_BICOrg"
+    | where Cloud !in('Fairfax', 'Mooncake') //NSP team is not ready with Telemetry in Sovg Clouds
+    | join kind = leftouter cluster('nspkpis.centralus').database('SecurePaaSResources').Data_ProxyResources on $left.AssetId == $right.nsplinkedResourceId
+    //| join kind = leftouter cluster('smaparg.westus3.kusto.windows.net').database('argmain').OpenARGBaseResourcesSnapshot on $left.AssetId == $right.id
+    //| extend asset = bag_pack("AssetId", AssetId, "Properties", props)
+    | extend compliant = iif(nspAccessMode1 == "enforced" or PublicNetworkAccess == "Disabled", "Compliant", "NonCompliant")
+    | extend SnapshotDateTime = SnapshotDateTime
+    | extend AssetClass = case(
+     AssetType == "microsoft.storage/storageaccounts", "Storage",
+     AssetType == "microsoft.keyvault/vaults", "KeyVault",
+     AssetType == "microsoft.documentdb/databaseaccounts", "CosmosDb",
+     AssetType == "microsoft.sql/servers", "Sql",
+     "N/A"
+    )
+    | where AssetType != "N/A"
+    | extend ActionTitle = strcat("[",Environment,"] BiC NSP - Enforce ", AssetClass)
+    | extend DueDate = iif(Environment == "NonProd", datetime('02-01-2026 00:00:00'), datetime('04-01-2026 00:00:00'))
+    | where compliant == "NonCompliant"
+};
+let _endTime = now();
+let _startTime = ago(7d);
+let highLevel =
+    ['All Detailed AccessLog']
+    //| where isnotempty(_resourceNameFilter)
+    | where AssetName contains _resourceNameFilter
+    | where ResourceGroup contains _resourceGroupFilter or isempty(_resourceGroupFilter)
+    | where isempty(_subscriptionId) or SubscriptionId in (_subscriptionId)
+    | project Environment, TenantName, SubscriptionName, ResourceGroup, AssetName, nspAccessMode, nspId,
+              AssetId = tolower(tostring(AssetId));
+let hlKeys = materialize(highLevel | project AssetId | distinct AssetId);
+let kvlogsAgg = materialize(
+    cluster('nsp-logs-summary.eastus').database('NspAggregatedLogs').KVLogs
+    | where TimeGenerated between (_startTime .. _endTime)
+    | extend PaaSResourceId = tolower(tostring(PaaSResourceId))
+    // 🔥 critical: reduce the huge logs table early
+    | where PaaSResourceId in (hlKeys)
+    | project TimeGenerated, SourceResourceId, LogCategory, SourceIP, NspProfile, MatchedRuleName,
+              SourceParameters, ResourceId, PaaSResourceId, DestinationFQDN
+    | extend isAllowedByNSP = LogCategory in (
+        'NspPublicInboundPerimeterRulesAllowed','NspPublicOutboundPerimeterRulesAllowed',
+        'NspOutboundAttempt','NspIntraPerimeterInboundAllowed','NspCrossPerimeterInboundAllowed',
+        'NspCrossPerimeterOutboundAllowed','NspPrivateInboundAllowed',
+        'NspPublicInboundResourceRulesDenied'
+      )
+    // keep this summarize, but avoid pulling "*" into arg_max
+    | summarize arg_max(TimeGenerated,
+                        SourceResourceId, LogCategory, SourceIP, NspProfile, MatchedRuleName,
+                        SourceParameters, ResourceId, DestinationFQDN, isAllowedByNSP)
+              by PaaSResourceId, SourceIP, NspProfile, SourceParameters, SourceResourceId, DestinationFQDN
+    | lookup kind=leftouter ServiceTagsExpanded on $left.SourceIP == $right.IPAddress
+    | extend joinKey = 1
+    | join kind=leftouter (BroadServiceTags | extend joinKey = 1) on joinKey
+    | where ipv4_is_in_any_range(SourceIP, PrefixList) == true
+    | project-away joinKey, PrefixList, joinKey1
+    | extend access = bag_pack(
+        "SourceIp", SourceIP,
+        "SourceParameters", SourceParameters,
+        "DestinationFQDN", DestinationFQDN,
+        "LogCategory", LogCategory,
+        "isAllowedByNSP", isAllowedByNSP,
+        "TagName", strcat(TagName, '-', TagName1),
+        "TimeGenerated", TimeGenerated
+      )
+    // 🔥 cap set size to prevent runaway memory
+    | summarize accessLogs = make_set(access, 25) by PaaSResourceId, isAllowedByNSP
+);
+let storagelogsAgg = materialize(
+    cluster('nsp-logs-summary.eastus').database('NspAggregatedLogs').StorageLogs
+    | where TimeGenerated between (_startTime .. _endTime)
+    | extend PaaSResourceId = tolower(tostring(PaaSResourceId))
+    // 🔥 critical: reduce the huge logs table early
+    | where PaaSResourceId in (hlKeys)
+    | project TimeGenerated, SourceResourceId, LogCategory, SourceIP, NspProfile, MatchedRuleName,
+              SourceParameters, ResourceId, PaaSResourceId, DestinationFQDN
+    | extend isAllowedByNSP = LogCategory in (
+        'NspPublicInboundPerimeterRulesAllowed','NspPublicOutboundPerimeterRulesAllowed',
+        'NspOutboundAttempt','NspIntraPerimeterInboundAllowed','NspCrossPerimeterInboundAllowed',
+        'NspCrossPerimeterOutboundAllowed','NspPrivateInboundAllowed',
+        'NspPublicInboundResourceRulesDenied'
+      )
+    // keep this summarize, but avoid pulling "*" into arg_max
+    | summarize arg_max(TimeGenerated,
+                        SourceResourceId, LogCategory, SourceIP, NspProfile, MatchedRuleName,
+                        SourceParameters, ResourceId, DestinationFQDN, isAllowedByNSP)
+              by PaaSResourceId, SourceIP, NspProfile, SourceParameters, SourceResourceId, DestinationFQDN
+    | lookup kind=leftouter ServiceTagsExpanded on $left.SourceIP == $right.IPAddress
+    | extend joinKey = 1
+    | join kind=leftouter (BroadServiceTags | extend joinKey = 1) on joinKey
+    | where ipv4_is_in_any_range(SourceIP, PrefixList) == true
+    | project-away joinKey, PrefixList, joinKey1
+    | extend access = bag_pack(
+        "SourceIp", SourceIP,
+        "SourceParameters", SourceParameters,
+        "DestinationFQDN", DestinationFQDN,
+        "LogCategory", LogCategory,
+        "isAllowedByNSP", isAllowedByNSP,
+        "TagName", strcat(TagName, '-', TagName1),
+        "TimeGenerated", TimeGenerated
+      )
+    // 🔥 cap set size to prevent runaway memory
+    | summarize accessLogs = make_set(access, 25) by PaaSResourceId, isAllowedByNSP
+);
+let SqllogsAgg = materialize(
+    cluster('nsp-logs-summary.eastus').database('NspAggregatedLogs').SQLLogs
+    | where TimeGenerated between (_startTime .. _endTime)
+    | extend PaaSResourceId = tolower(tostring(PaaSResourceId))
+    // 🔥 critical: reduce the huge logs table early
+    | where PaaSResourceId in (hlKeys)
+    | project TimeGenerated, SourceResourceId, LogCategory, SourceIP, NspProfile, MatchedRuleName,
+              SourceParameters, ResourceId, PaaSResourceId, DestinationFQDN
+    | extend isAllowedByNSP = LogCategory in (
+        'NspPublicInboundPerimeterRulesAllowed','NspPublicOutboundPerimeterRulesAllowed',
+        'NspOutboundAttempt','NspIntraPerimeterInboundAllowed','NspCrossPerimeterInboundAllowed',
+        'NspCrossPerimeterOutboundAllowed','NspPrivateInboundAllowed',
+        'NspPublicInboundResourceRulesDenied'
+      )
+    // keep this summarize, but avoid pulling "*" into arg_max
+    | summarize arg_max(TimeGenerated,
+                        SourceResourceId, LogCategory, SourceIP, NspProfile, MatchedRuleName,
+                        SourceParameters, ResourceId, DestinationFQDN, isAllowedByNSP)
+              by PaaSResourceId, SourceIP, NspProfile, SourceParameters, SourceResourceId, DestinationFQDN
+    | lookup kind=leftouter ServiceTagsExpanded on $left.SourceIP == $right.IPAddress
+    | extend joinKey = 1
+    | join kind=leftouter (BroadServiceTags | extend joinKey = 1) on joinKey
+    | where ipv4_is_in_any_range(SourceIP, PrefixList) == true
+    | project-away joinKey, PrefixList, joinKey1
+    | extend access = bag_pack(
+        "SourceIp", SourceIP,
+        "SourceParameters", SourceParameters,
+        "DestinationFQDN", DestinationFQDN,
+        "LogCategory", LogCategory,
+        "isAllowedByNSP", isAllowedByNSP,
+        "TagName", strcat(TagName, '-', TagName1),
+        "TimeGenerated", TimeGenerated
+      )
+    // 🔥 cap set size to prevent runaway memory
+    | summarize accessLogs = make_set(access, 25) by PaaSResourceId, isAllowedByNSP
+);
+let CosmoslogsAgg = materialize(
+    cluster('nsp-logs-summary.eastus').database('NspAggregatedLogs').CosmosLogs
+    | where TimeGenerated between (_startTime .. _endTime)
+    | extend PaaSResourceId = tolower(tostring(PaaSResourceId))
+    // 🔥 critical: reduce the huge logs table early
+    | where PaaSResourceId in (hlKeys)
+    | project TimeGenerated, SourceResourceId, LogCategory, SourceIP, NspProfile, MatchedRuleName,
+              SourceParameters, ResourceId, PaaSResourceId, DestinationFQDN
+    | extend isAllowedByNSP = LogCategory in (
+        'NspPublicInboundPerimeterRulesAllowed','NspPublicOutboundPerimeterRulesAllowed',
+        'NspOutboundAttempt','NspIntraPerimeterInboundAllowed','NspCrossPerimeterInboundAllowed',
+        'NspCrossPerimeterOutboundAllowed','NspPrivateInboundAllowed',
+        'NspPublicInboundResourceRulesDenied'
+      )
+    // keep this summarize, but avoid pulling "*" into arg_max
+    | summarize arg_max(TimeGenerated,
+                        SourceResourceId, LogCategory, SourceIP, NspProfile, MatchedRuleName,
+                        SourceParameters, ResourceId, DestinationFQDN, isAllowedByNSP)
+              by PaaSResourceId, SourceIP, NspProfile, SourceParameters, SourceResourceId, DestinationFQDN
+    | lookup kind=leftouter ServiceTagsExpanded on $left.SourceIP == $right.IPAddress
+    | extend joinKey = 1
+    | join kind=leftouter (BroadServiceTags | extend joinKey = 1) on joinKey
+    | where ipv4_is_in_any_range(SourceIP, PrefixList) == true
+    | project-away joinKey, PrefixList, joinKey1
+    | extend access = bag_pack(
+        "SourceIp", SourceIP,
+        "SourceParameters", SourceParameters,
+        "DestinationFQDN", DestinationFQDN,
+        "LogCategory", LogCategory,
+        "isAllowedByNSP", isAllowedByNSP,
+        "TagName", strcat(TagName, '-', TagName1),
+        "TimeGenerated", TimeGenerated
+      )
+    // 🔥 cap set size to prevent runaway memory
+    | summarize accessLogs = make_set(access, 25) by PaaSResourceId, isAllowedByNSP
+);
+let allLogsAgg = union kvlogsAgg, storagelogsAgg, SqllogsAgg, CosmoslogsAgg;
+highLevel
+| join kind=leftouter hint.strategy=broadcast hint.remote=right (allLogsAgg)
+    on $left.AssetId == $right.PaaSResourceId
+| extend networkLink = strcat("https://dataexplorer.azure.com/dashboards/0799d844-3039-4736-9d1a-9daab2aff826?p-_nspArmId=",replace_string(nspId,"/","%2F"),"&p-_startTime=7days&p-_endTime=now#8a97aa02-7bcb-451f-8007-e285c78af7a1")
+| project AssetName, nspAccessMode, accessLogs, Environment, TenantName, SubscriptionName, ResourceGroup, isAllowedByNSP, networkLink

@@ -361,15 +361,27 @@ integration) replaces it later.
 - [x] `y` key to yank cell to clipboard, `Y` for whole row
 - [x] Yank confirmation in status bar
 
-### Step 2 — Backend interface + HCL config
+### Step 1.6 — Connection config + management ✅
 
-- Create `backend/backend.go` with `Backend` interface
-- Create `config/config.go` with HCL parsing from `~/.jacques/config.hcl`
+- [x] HCL config at `~/.jacques/config.hcl`
+- [x] Named connections: `connection "kusto" "name" { cluster, database, token }`
+- [x] `default_connection` setting
+- [x] `-c <name>` flag to select connection
+- [x] `jacques config list` — tabular connection listing
+- [x] `jacques config init` — scaffold default config
+- [x] `jacques config set-token <name>` — update token (stdin or KUSTO_TOKEN env)
+- [x] `jacques config path` — print config file location
+- [x] Resolution order: flag > connection > env var > default
+- [x] Display settings in config (format, time_col, msg_col, level_col)
+- [x] Refresh script updated to write to config
+- [x] Seeded connections: cap-analytics, nsp-logs
+
+### Step 2 — Backend interface + provider abstraction
+
+- Create `backend/backend.go` with `Backend` interface + registry
 - Wrap existing kusto client as `backend/kusto/kusto.go`
-- Move token + cluster + database config from .env / flags into HCL
-- Move `refresh-token.ps1` to `~/.jacques/scripts/`
-- main.go reads config, picks backend by name, runs query
-- Flags continue to work as overrides
+- main.go resolves connection type → backend constructor
+- Different connection types dispatch to different backends
 
 ### Step 3 — CSV backend
 
