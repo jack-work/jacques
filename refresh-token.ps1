@@ -9,6 +9,11 @@ if (-not $token) {
 }
 
 $env:KUSTO_TOKEN = $token
-& "$PSScriptRoot\jacques.exe" config set-token $Connection
+$jacques = Get-Command jacques -ErrorAction SilentlyContinue
+if ($jacques) {
+    & $jacques.Source config set-token $Connection
+} else {
+    & "$PSScriptRoot\..\dev\jacques\jacques.exe" config set-token $Connection
+}
 
 Write-Host "Also set `$env:KUSTO_TOKEN for this session."
