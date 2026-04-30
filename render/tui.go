@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -616,29 +617,46 @@ func ansiWrap(code, text string) string {
 	return code + text + ansiReset
 }
 
+var viewCount int
+
 func (m *model) View() tea.View {
+	viewCount++
+	ctx := context.Background()
+	start := time.Now()
+
 	var v tea.View
 	v.AltScreen = true
+
+	var rendered bool
 	switch m.mode {
 	case modeDetail:
 		if m.detailDirty || m.detailRow != m.cursorRow {
 			m.cachedDetailView = m.renderDetail()
 			m.detailDirty = false
 			m.detailRow = m.cursorRow
+			rendered = true
 		}
 		v.SetContent(m.cachedDetailView)
 	case modeSearch:
-		// always re-render during active search input
 		m.cachedTableView = m.renderTable()
 		v.SetContent(m.cachedTableView + m.viewSearchPrompt())
 		m.tableDirty = false
+		rendered = true
 	default:
 		if m.tableDirty {
 			m.cachedTableView = m.renderTable()
 			m.tableDirty = false
+			rendered = true
 		}
 		v.SetContent(m.cachedTableView)
 	}
+
+	elapsed := time.Since(start)
+	if elapsed > 5*time.Millisecond || rendered {
+		logging.Debugf(ctx, "View() #%d mode=%d rendered=%v elapsed=%s",
+			viewCount, m.mode, rendered, elapsed)
+	}
+
 	return v
 }
 
