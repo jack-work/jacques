@@ -9,8 +9,10 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/jokellih/jacques/backend"
+	_ "github.com/jokellih/jacques/backend/csv"
+	_ "github.com/jokellih/jacques/backend/kusto"
 	"github.com/jokellih/jacques/config"
-	"github.com/jokellih/jacques/kusto"
 	"github.com/jokellih/jacques/logging"
 	"github.com/jokellih/jacques/render"
 )
@@ -66,21 +68,8 @@ func main() {
 		connCfg = cfg.DefaultConn()
 	}
 
-	// Resolve values: flag > connection > env > fallback
-	token := resolveValue("", envFallback("KUSTO_TOKEN"), connToken(connCfg))
-	clusterURL := resolveValue(*cluster, envFallback("KUSTO_CLUSTER"), connCluster(connCfg))
-	db := resolveValue(*database, envFallback("KUSTO_DATABASE"), connDatabase(connCfg))
-
-	if token == "" {
-		fmt.Fprintln(os.Stderr, "error: no token available")
-		fmt.Fprintln(os.Stderr, "  set it with: jacques config set-token <connection-name>")
-		fmt.Fprintln(os.Stderr, "  or export KUSTO_TOKEN")
-		os.Exit(1)
-	}
-	if clusterURL == "" {
-		fmt.Fprintln(os.Stderr, "error: no cluster URL. Use -cluster or configure a connection.")
-		os.Exit(1)
-	}
+	// Build resolved connection: flag > config > env > fallback
+	resolved := resolveConnection(connCfg, *cluster, *database)
 
 	// Resolve display settings: flag > config > defaults
 	fmtStr := resolveValue(*format, configFormat(cfg), "log")
@@ -121,13 +110,18 @@ func main() {
 
 	logging.Info(ctx, "jacques starting",
 		logging.String("format", fmtStr),
-		logging.String("connection", connName(connCfg)),
-		logging.String("cluster", clusterURL),
-		logging.String("database", db),
+		logging.String("connection", resolved.Name),
+		logging.String("type", resolved.Type),
 	)
 
-	client := kusto.NewClient(clusterURL, db, token)
-	store, err := client.QueryContext(ctx, kql)
+	be, err := backend.New(resolved)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer be.Close()
+
+	store, err := be.Query(ctx, kql)
 	if err != nil {
 		logging.Error(ctx, "query failed", logging.String("error", err.Error()))
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -328,8 +322,37 @@ func replaceTokenInConfig(content, connName, newToken string) string {
 }
 
 // ---------------------------------------------------------------------------
-// resolution helpers: flag > connection > env > fallback
+// resolution helpers
 // ---------------------------------------------------------------------------
+
+func resolveConnection(connCfg *config.Connection, clusterFlag, dbFlag string) config.Connection {
+	var c config.Connection
+	if connCfg != nil {
+		c = *connCfg
+	}
+	if c.Type == "" {
+		c.Type = "kusto"
+	}
+	if c.Name == "" {
+		c.Name = "(cli)"
+	}
+	if clusterFlag != "" {
+		c.Cluster = clusterFlag
+	}
+	if c.Cluster == "" {
+		c.Cluster = os.Getenv("KUSTO_CLUSTER")
+	}
+	if dbFlag != "" {
+		c.Database = dbFlag
+	}
+	if c.Database == "" {
+		c.Database = os.Getenv("KUSTO_DATABASE")
+	}
+	if c.Token == "" {
+		c.Token = os.Getenv("KUSTO_TOKEN")
+	}
+	return c
+}
 
 func resolveValue(values ...string) string {
 	for _, v := range values {
@@ -340,31 +363,6 @@ func resolveValue(values ...string) string {
 	return ""
 }
 
-func envFallback(key string) string     { return os.Getenv(key) }
-func connToken(c *config.Connection) string {
-	if c == nil {
-		return ""
-	}
-	return c.Token
-}
-func connCluster(c *config.Connection) string {
-	if c == nil {
-		return ""
-	}
-	return c.Cluster
-}
-func connDatabase(c *config.Connection) string {
-	if c == nil {
-		return ""
-	}
-	return c.Database
-}
-func connName(c *config.Connection) string {
-	if c == nil {
-		return "(none)"
-	}
-	return c.Name
-}
 func configFormat(cfg *config.Config) string {
 	if cfg.Display != nil && cfg.Display.Format != "" {
 		return cfg.Display.Format

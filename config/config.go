@@ -114,6 +114,10 @@ connection "kusto" "nsp-logs" {
   token    = ""
 }
 
+connection "csv" "sample" {
+  path = "testdata/sample.csv"
+}
+
 display {
   format    = "tui"
   time_col  = "env_time"
