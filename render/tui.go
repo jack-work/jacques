@@ -1,21 +1,23 @@
 package render
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jokellih/jacques/data"
-	"github.com/jokellih/jacques/logging"
 	"golang.org/x/term"
 )
+
+// PreviewHook is called when the user presses Enter on a row.
+// It receives the row index and the full RowStore.
+// If nil, Enter is a no-op with a status message.
+var PreviewHook func(store data.RowStore, row int)
 
 type TUIOptions struct {
 	Height     int
@@ -31,73 +33,51 @@ func DefaultTUIOptions() TUIOptions {
 }
 
 func TUI(store data.RowStore, opts TUIOptions) {
-	ctx := context.Background()
-
 	cols := store.Columns()
 	if len(cols) == 0 {
-		logging.Warn(ctx, "TUI received empty result")
 		fmt.Fprintln(os.Stderr, "(no results)")
 		return
 	}
 
 	filtered := filterColumns(store, opts.Columns)
 	termWidth, termHeight := getTerminalSize()
-	logging.Info(ctx, "TUI starting",
-		logging.Int("columns", len(filtered.Columns())),
-		logging.Int("rows", filtered.RowCount()),
-		logging.Int("term_width", termWidth),
-		logging.Int("term_height", termHeight),
-	)
-
 	cells := buildCells(filtered, opts)
 
 	m := &model{
-		store:       store,
-		filtered:    filtered,
-		cells:       cells,
-		opts:        opts,
-		termWidth:   termWidth,
-		termHeight:  termHeight,
-		colWidths:   computeNaturalWidths(filtered, cells),
-		tableDirty:  false,
-		detailDirty: true,
-		detailRow:   -1,
+		store:      store,
+		filtered:   filtered,
+		cells:      cells,
+		opts:       opts,
+		termWidth:  termWidth,
+		termHeight: termHeight,
+		colWidths:  computeNaturalWidths(filtered, cells),
+		dirty:      false,
 	}
-	m.cachedTableView = m.renderTable()
+	m.cached = m.renderTable()
 
 	if _, err := tea.NewProgram(m).Run(); err != nil {
-		logging.Error(ctx, "TUI program error", logging.String("error", err.Error()))
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
 		os.Exit(1)
 	}
-	logging.Info(ctx, "TUI exited cleanly")
 }
 
 // ---------------------------------------------------------------------------
 // model
 // ---------------------------------------------------------------------------
 
-type viewMode int
-
-const (
-	modeTable viewMode = iota
-	modeDetail
-	modeSearch
-)
-
 type searchMatch struct {
 	row, col int
 }
 
 type model struct {
-	store    data.RowStore // original (all columns) for detail view
-	filtered data.RowStore // column-filtered for table
-	cells    [][]string    // pre-formatted cell strings
+	store    data.RowStore
+	filtered data.RowStore
+	cells    [][]string
 
 	opts       TUIOptions
 	termWidth  int
 	termHeight int
-	colWidths  []int // natural (unclamped) widths
+	colWidths  []int
 
 	cursorRow int
 	cursorCol int
@@ -105,20 +85,17 @@ type model struct {
 	scrollCol int
 
 	expandedCol int // -1 = none
-	mode        viewMode
 
+	searching     bool
 	searchQuery   string
 	searchMatches []searchMatch
 	searchIdx     int
 
-	yankText string
+	statusMsg string
+	yankText  string
 
-	// render cache
-	cachedTableView  string
-	cachedDetailView string
-	tableDirty       bool
-	detailDirty      bool
-	detailRow        int // which row the cached detail is for
+	cached string
+	dirty  bool
 }
 
 func (m *model) Init() tea.Cmd { return nil }
@@ -126,6 +103,10 @@ func (m *model) Init() tea.Cmd { return nil }
 func (m *model) viewRows() int {
 	return m.termHeight - 3 // header + separator + status bar
 }
+
+// ---------------------------------------------------------------------------
+// expand
+// ---------------------------------------------------------------------------
 
 func (m *model) expandedLines() []string {
 	if m.expandedCol < 0 {
@@ -177,89 +158,32 @@ func (m *model) expandedRawValue() interface{} {
 	return row[m.expandedCol]
 }
 
-func isJSONValue(v interface{}) bool {
-	switch v.(type) {
-	case map[string]interface{}, []interface{}:
-		return true
-	}
-	if s, ok := v.(string); ok {
-		s = strings.TrimSpace(s)
-		return (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) ||
-			(strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]"))
-	}
-	return false
-}
-
-func prettyJSON(v interface{}) string {
-	switch t := v.(type) {
-	case map[string]interface{}, []interface{}:
-		b, err := json.MarshalIndent(t, "", "  ")
-		if err != nil {
-			return fmt.Sprintf("%v", v)
-		}
-		return string(b)
-	case string:
-		var parsed interface{}
-		if err := json.Unmarshal([]byte(t), &parsed); err == nil {
-			b, err := json.MarshalIndent(parsed, "", "  ")
-			if err == nil {
-				return string(b)
-			}
-		}
-		return t
-	default:
-		return fmt.Sprintf("%v", v)
-	}
-}
+// ---------------------------------------------------------------------------
+// update
+// ---------------------------------------------------------------------------
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	ctx := context.Background()
-	start := time.Now()
-	var msgType string
-
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		msgType = fmt.Sprintf("WindowSize(%dx%d)", msg.Width, msg.Height)
 		m.termWidth = msg.Width
 		m.termHeight = msg.Height
-		m.tableDirty = true
-		m.detailDirty = true
-		logging.Debugf(ctx, "Update: %s elapsed=%s", msgType, time.Since(start))
+		m.dirty = true
 		return m, nil
-
 	case tea.KeyPressMsg:
-		msgType = fmt.Sprintf("Key(%s)", msg.String())
-		result, cmd := m.handleKey(msg)
-		logging.Debugf(ctx, "Update: %s mode=%d elapsed=%s", msgType, m.mode, time.Since(start))
-		return result, cmd
-
-	default:
-		msgType = fmt.Sprintf("%T", msg)
-		if time.Since(start) > time.Millisecond {
-			logging.Debugf(ctx, "Update: %s elapsed=%s", msgType, time.Since(start))
+		if m.searching {
+			return m.handleSearchInput(msg.String(), msg)
 		}
+		return m.handleTableKey(msg.String())
 	}
 	return m, nil
-}
-
-func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	key := msg.String()
-
-	if m.mode == modeSearch {
-		return m.handleSearchInput(key, msg)
-	}
-
-	if m.mode == modeDetail {
-		return m.handleDetailKey(key)
-	}
-
-	return m.handleTableKey(key)
 }
 
 func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 	numRows := len(m.cells)
 	numCols := len(m.filtered.Columns())
 	vr := m.viewRows()
+
+	m.statusMsg = ""
 
 	switch key {
 	case "q", "ctrl+c":
@@ -274,9 +198,8 @@ func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-	// vertical movement
+	// vertical
 	case "j", "down":
-		m.yankText = ""
 		if m.cursorRow < numRows-1 {
 			m.cursorRow++
 		}
@@ -289,27 +212,15 @@ func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 	case "G":
 		m.cursorRow = numRows - 1
 	case "ctrl+d":
-		m.cursorRow += vr / 2
-		if m.cursorRow >= numRows {
-			m.cursorRow = numRows - 1
-		}
+		m.cursorRow = min(m.cursorRow+vr/2, numRows-1)
 	case "ctrl+u":
-		m.cursorRow -= vr / 2
-		if m.cursorRow < 0 {
-			m.cursorRow = 0
-		}
+		m.cursorRow = max(m.cursorRow-vr/2, 0)
 	case "pgdown":
-		m.cursorRow += vr
-		if m.cursorRow >= numRows {
-			m.cursorRow = numRows - 1
-		}
+		m.cursorRow = min(m.cursorRow+vr, numRows-1)
 	case "pgup":
-		m.cursorRow -= vr
-		if m.cursorRow < 0 {
-			m.cursorRow = 0
-		}
+		m.cursorRow = max(m.cursorRow-vr, 0)
 
-	// horizontal movement
+	// horizontal
 	case "h", "left":
 		if m.cursorCol > 0 {
 			m.cursorCol--
@@ -327,14 +238,20 @@ func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 		m.cursorCol = numCols - 1
 		m.expandedCol = -1
 
-	// actions
-	case "enter":
-		m.mode = modeDetail
+	// expand cell
 	case " ", "space":
 		if m.expandedCol == m.cursorCol {
 			m.expandedCol = -1
 		} else {
 			m.expandedCol = m.cursorCol
+		}
+
+	// preview (hook for vim harness)
+	case "enter":
+		if PreviewHook != nil {
+			PreviewHook(m.store, m.cursorRow)
+		} else {
+			m.statusMsg = "no preview harness attached"
 		}
 
 	// yank
@@ -362,7 +279,7 @@ func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 
 	// search
 	case "/":
-		m.mode = modeSearch
+		m.searching = true
 		m.searchQuery = ""
 	case "n":
 		m.nextMatch(1)
@@ -371,85 +288,21 @@ func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 	}
 
 	m.clampScroll()
-	m.tableDirty = true
+	m.dirty = true
 	return m, nil
-}
-
-func (m *model) handleDetailKey(key string) (tea.Model, tea.Cmd) {
-	switch key {
-	case "q", "ctrl+c":
-		return m, tea.Quit
-	case "esc", "enter":
-		m.mode = modeTable
-		// table only dirty if cursor moved while in detail
-	case "j", "down":
-		if m.cursorRow < len(m.cells)-1 {
-			m.cursorRow++
-			m.detailDirty = true
-			m.tableDirty = true
-		}
-	case "k", "up":
-		if m.cursorRow > 0 {
-			m.cursorRow--
-			m.detailDirty = true
-			m.tableDirty = true
-		}
-	case "y":
-		m.yankDetailValue()
-	case "n":
-		m.nextMatch(1)
-		m.detailDirty = true
-		m.tableDirty = true
-	case "N":
-		m.nextMatch(-1)
-		m.detailDirty = true
-		m.tableDirty = true
-	}
-	return m, nil
-}
-
-func (m *model) yankDetailValue() {
-	if m.cursorRow < 0 || m.cursorRow >= m.store.RowCount() {
-		return
-	}
-	row, err := m.store.Row(m.cursorRow)
-	if err != nil {
-		return
-	}
-	// Yank the full row as key: value pairs
-	allCols := m.store.Columns()
-	var parts []string
-	for i, col := range allCols {
-		if i >= len(row) || row[i] == nil {
-			continue
-		}
-		var val string
-		if isJSONValue(row[i]) {
-			val = prettyJSON(row[i])
-		} else {
-			val = formatValue(row[i], col.Type, DefaultOptions())
-		}
-		if val != "" {
-			parts = append(parts, fmt.Sprintf("%s: %s", col.Name, val))
-		}
-	}
-	text := strings.Join(parts, "\n")
-	m.yankText = text
-	copyToClipboard(text)
-	m.detailDirty = true
 }
 
 func (m *model) handleSearchInput(key string, msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "enter":
 		m.runSearch()
-		m.mode = modeTable
+		m.searching = false
 		if len(m.searchMatches) > 0 {
 			m.searchIdx = 0
 			m.jumpToMatch()
 		}
 	case "esc":
-		m.mode = modeTable
+		m.searching = false
 	case "backspace":
 		if len(m.searchQuery) > 0 {
 			m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
@@ -461,6 +314,7 @@ func (m *model) handleSearchInput(key string, msg tea.KeyPressMsg) (tea.Model, t
 			m.searchQuery += msg.Text
 		}
 	}
+	m.dirty = true
 	return m, nil
 }
 
@@ -474,22 +328,6 @@ func (m *model) runSearch() {
 		return
 	}
 	q := strings.ToLower(m.searchQuery)
-
-	if m.expandedCol >= 0 {
-		// Search only within the expanded cell's full content (including pretty JSON)
-		raw := m.expandedRawValue()
-		var searchText string
-		if isJSONValue(raw) {
-			searchText = prettyJSON(raw)
-		} else if m.cursorRow < len(m.cells) && m.expandedCol < len(m.cells[m.cursorRow]) {
-			searchText = m.cells[m.cursorRow][m.expandedCol]
-		}
-		if strings.Contains(strings.ToLower(searchText), q) {
-			m.searchMatches = append(m.searchMatches, searchMatch{m.cursorRow, m.expandedCol})
-		}
-		return
-	}
-
 	for r, row := range m.cells {
 		for c, cell := range row {
 			if strings.Contains(strings.ToLower(cell), q) {
@@ -532,8 +370,6 @@ func (m *model) clampScroll() {
 	if m.cursorRow < m.scrollRow {
 		m.scrollRow = m.cursorRow
 	}
-
-	// Ensure the cursor row (including its expanded height) fits in view
 	for {
 		linesUsed := 0
 		fits := false
@@ -576,7 +412,7 @@ func (m *model) visibleColRange() int {
 	for c := m.scrollCol; c < len(m.filtered.Columns()); c++ {
 		cw := m.displayWidth(c)
 		if count > 0 {
-			cw += 3 // separator
+			cw += 3
 		}
 		if used+cw > w {
 			break
@@ -599,9 +435,8 @@ func (m *model) displayWidth(col int) int {
 		return maxW
 	}
 	w := m.colWidths[col]
-	maxNormal := 30
-	if w > maxNormal {
-		w = maxNormal
+	if w > 30 {
+		w = 30
 	}
 	if w < 4 {
 		w = 4
@@ -613,20 +448,17 @@ func (m *model) displayWidth(col int) int {
 // view
 // ---------------------------------------------------------------------------
 
-// ANSI escape sequences for fast cell rendering (avoid lipgloss.Render per cell)
 const (
 	ansiReset     = "\x1b[0m"
-	ansiHeader    = "\x1b[1;38;5;39m"   // bold + fg 39
-	ansiSep       = "\x1b[38;5;238m"    // fg 238
-	ansiNormal    = "\x1b[38;5;252m"    // fg 252
-	ansiCursor    = "\x1b[38;5;229;48;5;57m" // fg 229 bg 57
-	ansiRowHL     = "\x1b[38;5;229;48;5;236m" // fg 229 bg 236
-	ansiSearchHL  = "\x1b[1;38;5;0;48;5;220m" // bold fg 0 bg 220
-	ansiMatchCell = "\x1b[38;5;220m"    // fg 220
-	ansiHelp      = "\x1b[38;5;241m"    // fg 241
+	ansiHeader    = "\x1b[1;38;5;39m"
+	ansiSep       = "\x1b[38;5;238m"
+	ansiNormal    = "\x1b[38;5;252m"
+	ansiCursor    = "\x1b[38;5;229;48;5;57m"
+	ansiRowHL     = "\x1b[38;5;229;48;5;236m"
+	ansiSearchHL  = "\x1b[1;38;5;0;48;5;220m"
+	ansiMatchCell = "\x1b[38;5;220m"
+	ansiHelp      = "\x1b[38;5;241m"
 )
-
-
 
 func ansiWrap(code, text string) string {
 	return code + text + ansiReset
@@ -636,44 +468,18 @@ func (m *model) View() tea.View {
 	var v tea.View
 	v.AltScreen = true
 
-	// always keep table current
-	if m.tableDirty {
-		m.cachedTableView = m.renderTable()
-		m.tableDirty = false
+	if m.dirty || m.searching {
+		m.cached = m.renderTable()
+		m.dirty = false
 	}
 
-	switch m.mode {
-	case modeDetail:
-		// overlay detail panel on top of the table
-		v.SetContent(m.overlayDetail())
-	case modeSearch:
-		v.SetContent(m.cachedTableView + m.viewSearchPrompt())
-	default:
-		v.SetContent(m.cachedTableView)
+	content := m.cached
+	if m.searching {
+		content += "\n" + ansiWrap(ansiHelp, "/") + m.searchQuery + "█"
 	}
 
+	v.SetContent(content)
 	return v
-}
-
-func (m *model) overlayDetail() string {
-	tableLines := strings.Split(m.cachedTableView, "\n")
-	detailLines := m.renderDetailLines()
-
-	// replace table data lines (starting after header+separator) with detail
-	// keep header (line 0) and separator (line 1) from table
-	replaceStart := 2
-	for i, dl := range detailLines {
-		idx := replaceStart + i
-		if idx < len(tableLines) {
-			tableLines[idx] = dl + "\x1b[K"
-		}
-	}
-	// clear any remaining table lines after detail content
-	for i := replaceStart + len(detailLines); i < len(tableLines)-1; i++ {
-		tableLines[i] = "\x1b[K"
-	}
-
-	return strings.Join(tableLines, "\n")
 }
 
 func (m *model) renderTable() string {
@@ -685,13 +491,11 @@ func (m *model) renderTable() string {
 		colEnd = len(m.filtered.Columns())
 	}
 
-	// header
 	m.writeHeaderRow(&b, colStart, colEnd)
 	b.WriteString("\x1b[K\n")
 	m.writeSeparator(&b, colStart, colEnd)
 	b.WriteString("\x1b[K\n")
 
-	// data rows
 	vr := m.viewRows()
 	linesUsed := 0
 	for r := m.scrollRow; r < len(m.cells) && linesUsed < vr; r++ {
@@ -705,14 +509,11 @@ func (m *model) renderTable() string {
 			linesUsed++
 		}
 	}
-
-	// clear remaining lines
 	for linesUsed < vr {
 		b.WriteString("\x1b[K\n")
 		linesUsed++
 	}
 
-	// status bar
 	b.WriteString(m.statusBar())
 	b.WriteString("\x1b[K")
 
@@ -749,7 +550,6 @@ func (m *model) renderDataRow(row, colStart, colEnd int) []string {
 		numLines = m.expandedRowHeight()
 	}
 
-	// For each column, compute wrapped lines
 	type colLines struct {
 		lines []string
 		width int
@@ -762,7 +562,6 @@ func (m *model) renderDataRow(row, colStart, colEnd int) []string {
 		if c < len(m.cells[row]) {
 			cellText = m.cells[row][c]
 		}
-
 		if isExpanded && c == m.expandedCol {
 			colData[ci] = colLines{m.expandedLines(), w}
 		} else {
@@ -787,10 +586,10 @@ func (m *model) renderDataRow(row, colStart, colEnd int) []string {
 			isCellMatch := m.isCellSearchMatch(row, c)
 
 			if isCurrentCell {
-				display = m.highlightSearchANSI(display)
+				display = m.highlightSearch(display)
 				b.WriteString(ansiWrap(ansiCursor, display))
 			} else if isCellMatch {
-				display = m.highlightSearchANSI(display)
+				display = m.highlightSearch(display)
 				if isCurrentRow {
 					b.WriteString(ansiWrap(ansiRowHL, display))
 				} else {
@@ -806,43 +605,6 @@ func (m *model) renderDataRow(row, colStart, colEnd int) []string {
 	}
 
 	return output
-}
-
-func rangeSlice(start, end int) []int {
-	s := make([]int, end-start)
-	for i := range s {
-		s[i] = start + i
-	}
-	return s
-}
-
-func wrapText(text string, width, maxLines int) []string {
-	if width <= 0 {
-		return []string{""}
-	}
-	var lines []string
-	for len(text) > 0 && len(lines) < maxLines {
-		end := width
-		if end > len(text) {
-			end = len(text)
-		}
-		line := text[:end]
-		text = text[end:]
-
-		if len(lines) == maxLines-1 && len(text) > 0 {
-			// last allowed line and there's more text — add ellipsis
-			if len(line) > 1 {
-				line = line[:len(line)-1] + "…"
-			}
-		}
-
-		line = padOrTruncate(line, width)
-		lines = append(lines, line)
-	}
-	if len(lines) == 0 {
-		lines = []string{strings.Repeat(" ", width)}
-	}
-	return lines
 }
 
 func (m *model) statusBar() string {
@@ -866,110 +628,18 @@ func (m *model) statusBar() string {
 		parts = append(parts, fmt.Sprintf("yanked: %q", yanked))
 	}
 
+	if m.statusMsg != "" {
+		parts = append(parts, m.statusMsg)
+	}
+
 	left := strings.Join(parts, "  ")
-	right := "hjkl:move  space:expand  y:yank  enter:detail  /:search  q:quit"
+	right := "hjkl:move  space:expand  y:yank  /:search  q:quit"
 
 	gap := m.termWidth - len(left) - len(right)
 	if gap < 2 {
 		return ansiWrap(ansiHelp, left)
 	}
 	return ansiWrap(ansiHelp, left+strings.Repeat(" ", gap)+right)
-}
-
-func (m *model) viewSearchPrompt() string {
-	return "\n" + ansiWrap(ansiHelp, "/") + m.searchQuery + "█"
-}
-
-// ---------------------------------------------------------------------------
-// detail view
-// ---------------------------------------------------------------------------
-
-const (
-	ansiDetailKey   = "\x1b[1;38;5;39m"  // bold fg 39
-	ansiDetailVal   = "\x1b[38;5;252m"   // fg 252
-	ansiTitleBar    = "\x1b[1;38;5;229;48;5;57m" // bold fg 229 bg 57
-)
-
-func (m *model) renderDetailLines() []string {
-	idx := m.cursorRow
-	if idx < 0 || idx >= m.store.RowCount() {
-		return []string{"No row selected"}
-	}
-
-	row, _ := m.store.Row(idx)
-	allCols := m.store.Columns()
-
-	maxKeyLen := 0
-	for _, col := range allCols {
-		if len(col.Name) > maxKeyLen {
-			maxKeyLen = len(col.Name)
-		}
-	}
-
-	var lines []string
-	lines = append(lines, ansiWrap(ansiTitleBar, fmt.Sprintf(" Row %d/%d ", idx+1, m.store.RowCount())))
-	lines = append(lines, "")
-
-	detailOpts := DefaultOptions()
-	detailOpts.MaxColWidth = 0
-	for i, col := range allCols {
-		if i >= len(row) {
-			continue
-		}
-		raw := row[i]
-		var val string
-		if isJSONValue(raw) {
-			val = prettyJSON(raw)
-		} else {
-			val = formatValue(raw, col.Type, detailOpts)
-		}
-		if val == "" {
-			continue
-		}
-
-		key := fmt.Sprintf("%-*s:", maxKeyLen, col.Name)
-		prefix := "  " + ansiWrap(ansiDetailKey, key) + " "
-
-		if strings.Contains(val, "\n") {
-			valLines := strings.Split(val, "\n")
-			indent := strings.Repeat(" ", maxKeyLen+4)
-			for li, vl := range valLines {
-				if m.searchQuery != "" {
-					vl = m.highlightSearchANSI(vl)
-				}
-				if li == 0 {
-					lines = append(lines, prefix+ansiWrap(ansiDetailVal, vl))
-				} else {
-					lines = append(lines, indent+ansiWrap(ansiDetailVal, vl))
-				}
-			}
-		} else {
-			if m.searchQuery != "" {
-				val = m.highlightSearchANSI(val)
-			}
-			lines = append(lines, prefix+ansiWrap(ansiDetailVal, val))
-		}
-	}
-
-	lines = append(lines, "")
-	var help []string
-	help = append(help, "esc/enter: back")
-	help = append(help, "j/k: prev/next row")
-	if len(m.searchMatches) > 0 {
-		help = append(help, fmt.Sprintf("n/N: search [%d/%d]", m.searchIdx+1, len(m.searchMatches)))
-	}
-	if m.yankText != "" {
-		yanked := m.yankText
-		if len(yanked) > 30 {
-			yanked = yanked[:29] + "…"
-		}
-		help = append(help, fmt.Sprintf("yanked: %q", yanked))
-	}
-	help = append(help, "y: yank row")
-	help = append(help, "q: quit")
-	lines = append(lines, ansiWrap(ansiHelp, "  "+strings.Join(help, "  ")))
-
-	return lines
 }
 
 // ---------------------------------------------------------------------------
@@ -988,11 +658,7 @@ func (m *model) isCellSearchMatch(row, col int) bool {
 	return false
 }
 
-func (m *model) highlightSearchInText(text string) string {
-	return m.highlightSearchANSI(text)
-}
-
-func (m *model) highlightSearchANSI(text string) string {
+func (m *model) highlightSearch(text string) string {
 	if m.searchQuery == "" {
 		return text
 	}
@@ -1021,6 +687,41 @@ func (m *model) highlightSearchANSI(text string) string {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+func isJSONValue(v interface{}) bool {
+	switch v.(type) {
+	case map[string]interface{}, []interface{}:
+		return true
+	}
+	if s, ok := v.(string); ok {
+		s = strings.TrimSpace(s)
+		return (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) ||
+			(strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]"))
+	}
+	return false
+}
+
+func prettyJSON(v interface{}) string {
+	switch t := v.(type) {
+	case map[string]interface{}, []interface{}:
+		b, err := json.MarshalIndent(t, "", "  ")
+		if err != nil {
+			return fmt.Sprintf("%v", v)
+		}
+		return string(b)
+	case string:
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(t), &parsed); err == nil {
+			b, err := json.MarshalIndent(parsed, "", "  ")
+			if err == nil {
+				return string(b)
+			}
+		}
+		return t
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
 
 func getTerminalSize() (width, height int) {
 	w, h, err := term.GetSize(int(os.Stdout.Fd()))
@@ -1108,6 +809,40 @@ func computeNaturalWidths(store data.RowStore, cells [][]string) []int {
 	return widths
 }
 
+func rangeSlice(start, end int) []int {
+	s := make([]int, end-start)
+	for i := range s {
+		s[i] = start + i
+	}
+	return s
+}
+
+func wrapText(text string, width, maxLines int) []string {
+	if width <= 0 {
+		return []string{""}
+	}
+	var lines []string
+	for len(text) > 0 && len(lines) < maxLines {
+		end := width
+		if end > len(text) {
+			end = len(text)
+		}
+		line := text[:end]
+		text = text[end:]
+		if len(lines) == maxLines-1 && len(text) > 0 {
+			if len(line) > 1 {
+				line = line[:len(line)-1] + "…"
+			}
+		}
+		line = padOrTruncate(line, width)
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		lines = []string{strings.Repeat(" ", width)}
+	}
+	return lines
+}
+
 func padOrTruncate(s string, w int) string {
 	if w <= 0 {
 		return ""
@@ -1143,4 +878,18 @@ func copyToClipboard(text string) {
 	}
 	cmd.Stdin = strings.NewReader(text)
 	_ = cmd.Run()
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
