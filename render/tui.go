@@ -213,16 +213,31 @@ func prettyJSON(v interface{}) string {
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	ctx := context.Background()
+	start := time.Now()
+	var msgType string
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		msgType = fmt.Sprintf("WindowSize(%dx%d)", msg.Width, msg.Height)
 		m.termWidth = msg.Width
 		m.termHeight = msg.Height
 		m.tableDirty = true
 		m.detailDirty = true
+		logging.Debugf(ctx, "Update: %s elapsed=%s", msgType, time.Since(start))
 		return m, nil
 
 	case tea.KeyPressMsg:
-		return m.handleKey(msg)
+		msgType = fmt.Sprintf("Key(%s)", msg.String())
+		result, cmd := m.handleKey(msg)
+		logging.Debugf(ctx, "Update: %s mode=%d elapsed=%s", msgType, m.mode, time.Since(start))
+		return result, cmd
+
+	default:
+		msgType = fmt.Sprintf("%T", msg)
+		if time.Since(start) > time.Millisecond {
+			logging.Debugf(ctx, "Update: %s elapsed=%s", msgType, time.Since(start))
+		}
 	}
 	return m, nil
 }
@@ -617,47 +632,48 @@ func ansiWrap(code, text string) string {
 	return code + text + ansiReset
 }
 
-var viewCount int
-
 func (m *model) View() tea.View {
-	viewCount++
-	ctx := context.Background()
-	start := time.Now()
-
 	var v tea.View
 	v.AltScreen = true
 
-	var rendered bool
+	// always keep table current
+	if m.tableDirty {
+		m.cachedTableView = m.renderTable()
+		m.tableDirty = false
+	}
+
 	switch m.mode {
 	case modeDetail:
-		if m.detailDirty || m.detailRow != m.cursorRow {
-			m.cachedDetailView = m.renderDetail()
-			m.detailDirty = false
-			m.detailRow = m.cursorRow
-			rendered = true
-		}
-		v.SetContent(m.cachedDetailView)
+		// overlay detail panel on top of the table
+		v.SetContent(m.overlayDetail())
 	case modeSearch:
-		m.cachedTableView = m.renderTable()
 		v.SetContent(m.cachedTableView + m.viewSearchPrompt())
-		m.tableDirty = false
-		rendered = true
 	default:
-		if m.tableDirty {
-			m.cachedTableView = m.renderTable()
-			m.tableDirty = false
-			rendered = true
-		}
 		v.SetContent(m.cachedTableView)
 	}
 
-	elapsed := time.Since(start)
-	if elapsed > 5*time.Millisecond || rendered {
-		logging.Debugf(ctx, "View() #%d mode=%d rendered=%v elapsed=%s",
-			viewCount, m.mode, rendered, elapsed)
+	return v
+}
+
+func (m *model) overlayDetail() string {
+	tableLines := strings.Split(m.cachedTableView, "\n")
+	detailLines := m.renderDetailLines()
+
+	// replace table data lines (starting after header+separator) with detail
+	// keep header (line 0) and separator (line 1) from table
+	replaceStart := 2
+	for i, dl := range detailLines {
+		idx := replaceStart + i
+		if idx < len(tableLines) {
+			tableLines[idx] = dl + "\x1b[K"
+		}
+	}
+	// clear any remaining table lines after detail content
+	for i := replaceStart + len(detailLines); i < len(tableLines)-1; i++ {
+		tableLines[i] = "\x1b[K"
 	}
 
-	return v
+	return strings.Join(tableLines, "\n")
 }
 
 func (m *model) renderTable() string {
@@ -671,9 +687,9 @@ func (m *model) renderTable() string {
 
 	// header
 	m.writeHeaderRow(&b, colStart, colEnd)
-	b.WriteByte('\n')
+	b.WriteString("\x1b[K\n")
 	m.writeSeparator(&b, colStart, colEnd)
-	b.WriteByte('\n')
+	b.WriteString("\x1b[K\n")
 
 	// data rows
 	vr := m.viewRows()
@@ -685,19 +701,20 @@ func (m *model) renderTable() string {
 				break
 			}
 			b.WriteString(line)
-			b.WriteByte('\n')
+			b.WriteString("\x1b[K\n")
 			linesUsed++
 		}
 	}
 
-	// fill remaining lines to prevent leftover content from previous frame
+	// clear remaining lines
 	for linesUsed < vr {
-		b.WriteByte('\n')
+		b.WriteString("\x1b[K\n")
 		linesUsed++
 	}
 
 	// status bar
 	b.WriteString(m.statusBar())
+	b.WriteString("\x1b[K")
 
 	return b.String()
 }
@@ -873,17 +890,15 @@ const (
 	ansiTitleBar    = "\x1b[1;38;5;229;48;5;57m" // bold fg 229 bg 57
 )
 
-func (m *model) renderDetail() string {
+func (m *model) renderDetailLines() []string {
 	idx := m.cursorRow
 	if idx < 0 || idx >= m.store.RowCount() {
-		return "No row selected"
+		return []string{"No row selected"}
 	}
 
 	row, _ := m.store.Row(idx)
 	allCols := m.store.Columns()
-	var b strings.Builder
 
-	// Pre-compute max key width for alignment
 	maxKeyLen := 0
 	for _, col := range allCols {
 		if len(col.Name) > maxKeyLen {
@@ -891,13 +906,9 @@ func (m *model) renderDetail() string {
 		}
 	}
 
-	linesUsed := 0
-
-	b.WriteString(ansiWrap(ansiTitleBar, fmt.Sprintf(" Row %d/%d ", idx+1, m.store.RowCount())))
-	b.WriteByte('\n')
-	linesUsed++
-	b.WriteByte('\n')
-	linesUsed++
+	var lines []string
+	lines = append(lines, ansiWrap(ansiTitleBar, fmt.Sprintf(" Row %d/%d ", idx+1, m.store.RowCount())))
+	lines = append(lines, "")
 
 	detailOpts := DefaultOptions()
 	detailOpts.MaxColWidth = 0
@@ -905,7 +916,6 @@ func (m *model) renderDetail() string {
 		if i >= len(row) {
 			continue
 		}
-
 		raw := row[i]
 		var val string
 		if isJSONValue(raw) {
@@ -918,41 +928,30 @@ func (m *model) renderDetail() string {
 		}
 
 		key := fmt.Sprintf("%-*s:", maxKeyLen, col.Name)
-		b.WriteString("  ")
-		b.WriteString(ansiWrap(ansiDetailKey, key))
-		b.WriteByte(' ')
+		prefix := "  " + ansiWrap(ansiDetailKey, key) + " "
 
 		if strings.Contains(val, "\n") {
-			lines := strings.Split(val, "\n")
-			for li, line := range lines {
+			valLines := strings.Split(val, "\n")
+			indent := strings.Repeat(" ", maxKeyLen+4)
+			for li, vl := range valLines {
 				if m.searchQuery != "" {
-					line = m.highlightSearchANSI(line)
+					vl = m.highlightSearchANSI(vl)
 				}
 				if li == 0 {
-					b.WriteString(ansiWrap(ansiDetailVal, line))
+					lines = append(lines, prefix+ansiWrap(ansiDetailVal, vl))
 				} else {
-					b.WriteByte('\n')
-					linesUsed++
-					b.WriteString(strings.Repeat(" ", maxKeyLen+4))
-					b.WriteString(ansiWrap(ansiDetailVal, line))
+					lines = append(lines, indent+ansiWrap(ansiDetailVal, vl))
 				}
 			}
 		} else {
 			if m.searchQuery != "" {
 				val = m.highlightSearchANSI(val)
 			}
-			b.WriteString(ansiWrap(ansiDetailVal, val))
+			lines = append(lines, prefix+ansiWrap(ansiDetailVal, val))
 		}
-		b.WriteByte('\n')
-		linesUsed++
 	}
 
-	// pad to fill screen
-	for linesUsed < m.termHeight-1 {
-		b.WriteByte('\n')
-		linesUsed++
-	}
-
+	lines = append(lines, "")
 	var help []string
 	help = append(help, "esc/enter: back")
 	help = append(help, "j/k: prev/next row")
@@ -968,9 +967,9 @@ func (m *model) renderDetail() string {
 	}
 	help = append(help, "y: yank row")
 	help = append(help, "q: quit")
-	b.WriteString(ansiWrap(ansiHelp, "  "+strings.Join(help, "  ")))
+	lines = append(lines, ansiWrap(ansiHelp, "  "+strings.Join(help, "  ")))
 
-	return b.String()
+	return lines
 }
 
 // ---------------------------------------------------------------------------
