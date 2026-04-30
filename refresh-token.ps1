@@ -9,11 +9,15 @@ if (-not $token) {
 }
 
 $env:KUSTO_TOKEN = $token
-$jacques = Get-Command jacques -ErrorAction SilentlyContinue
+
+$jacques = Get-Command jacques.exe -CommandType Application -ErrorAction SilentlyContinue
+if (-not $jacques) {
+    $jacques = Get-Command jacques -CommandType Application -ErrorAction SilentlyContinue
+}
 if ($jacques) {
-    & $jacques.Source config set-token $Connection
+    & $jacques.Path config set-token $Connection
 } else {
-    & "$PSScriptRoot\..\dev\jacques\jacques.exe" config set-token $Connection
+    Write-Warning "jacques not found on PATH. Token set in `$env:KUSTO_TOKEN only."
 }
 
 Write-Host "Also set `$env:KUSTO_TOKEN for this session."
