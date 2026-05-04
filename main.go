@@ -12,6 +12,7 @@ import (
 
 	"github.com/jokellih/jacques/backend"
 	_ "github.com/jokellih/jacques/backend/csv"
+	_ "github.com/jokellih/jacques/backend/duckdb"
 	_ "github.com/jokellih/jacques/backend/kusto"
 	"github.com/jokellih/jacques/cache"
 	"github.com/jokellih/jacques/config"
@@ -129,11 +130,24 @@ func main() {
 		logging.String("type", resolved.Type),
 	)
 
-	// Check cache
+	// Open cache
 	useCache := !*noCache
+	var dc *cache.DuckCache
+	if useCache {
+		var err error
+		dc, err = cache.NewDuckCache()
+		if err != nil {
+			logging.Warn(ctx, "failed to open cache, continuing without", logging.String("error", err.Error()))
+			useCache = false
+		} else {
+			defer dc.Close()
+		}
+	}
+
+	// Check cache
 	var store data.RowStore
 	if useCache && !*refresh {
-		if cached, ok := cache.Get(ctx, resolved.Name, kql); ok {
+		if cached, ok := dc.Get(ctx, resolved.Name, kql); ok {
 			store = cached
 			logging.Info(ctx, "serving from cache",
 				logging.Int("rows", store.RowCount()),
@@ -158,7 +172,7 @@ func main() {
 		}
 
 		if useCache {
-			if err := cache.Put(ctx, resolved.Name, kql, store); err != nil {
+			if err := dc.Put(ctx, resolved.Name, kql, store); err != nil {
 				logging.Warn(ctx, "failed to cache result", logging.String("error", err.Error()))
 			}
 		}
@@ -217,16 +231,25 @@ func main() {
 
 func handleCache(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: jacques cache <list|clear|path>")
+		fmt.Fprintln(os.Stderr, "usage: jacques cache <list|clear|query|path>")
 		os.Exit(1)
 	}
 
+	ctx := context.Background()
+
 	switch args[0] {
 	case "path":
-		fmt.Println(cache.Dir())
+		fmt.Println(cache.DuckDBPath())
 
 	case "list":
-		entries, err := cache.List()
+		dc, err := cache.NewDuckCache()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		defer dc.Close()
+
+		entries, err := dc.List(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -236,8 +259,8 @@ func handleCache(args []string) {
 			return
 		}
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "CONN\tROWS\tCOLS\tSIZE\tAGE\tQUERY")
-		fmt.Fprintln(tw, "----\t----\t----\t----\t---\t-----")
+		fmt.Fprintln(tw, "CONN\tROWS\tCOLS\tAGE\tQUERY")
+		fmt.Fprintln(tw, "----\t----\t----\t---\t-----")
 		for _, e := range entries {
 			age := time.Since(e.Timestamp).Truncate(time.Second)
 			query := e.Query
@@ -246,33 +269,53 @@ func handleCache(args []string) {
 			}
 			query = strings.ReplaceAll(query, "\n", " ")
 			query = strings.ReplaceAll(query, "\r", "")
-			fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%s\t%s\n",
-				e.Conn, e.Rows, e.Cols, humanSize(e.SizeBytes), age, query)
+			fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%s\n",
+				e.Conn, e.Rows, e.Cols, age, query)
 		}
 		tw.Flush()
 
 	case "clear":
-		if err := cache.Clear(); err != nil {
+		dc, err := cache.NewDuckCache()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		defer dc.Close()
+
+		if err := dc.Clear(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println("cache cleared")
 
+	case "query":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: jacques cache query <SQL>")
+			fmt.Fprintln(os.Stderr, "  run SQL against cached results")
+			fmt.Fprintln(os.Stderr, "  use: jacques cache list  to see available tables")
+			os.Exit(1)
+		}
+		dc, err := cache.NewDuckCache()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		defer dc.Close()
+
+		sql := strings.Join(args[1:], " ")
+		store, err := dc.QueryCache(ctx, sql)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+		opts := render.DefaultOptions()
+		render.Table(os.Stdout, store, opts)
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown cache command: %s\n", args[0])
-		fmt.Fprintln(os.Stderr, "usage: jacques cache <list|clear|path>")
+		fmt.Fprintln(os.Stderr, "usage: jacques cache <list|clear|query|path>")
 		os.Exit(1)
-	}
-}
-
-func humanSize(bytes int64) string {
-	switch {
-	case bytes >= 1<<20:
-		return fmt.Sprintf("%.1fMB", float64(bytes)/float64(1<<20))
-	case bytes >= 1<<10:
-		return fmt.Sprintf("%.1fKB", float64(bytes)/float64(1<<10))
-	default:
-		return fmt.Sprintf("%dB", bytes)
 	}
 }
 
