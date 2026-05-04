@@ -2,3 +2,8 @@
 *.har
 *.exe
 *.exe~
+*.py
+*.csv
+*.md
+!plans/*.md
+!README.md
