@@ -3,13 +3,17 @@ package main
 import (
 	"bufio"
 	"context"
+	"embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/jokellih/jacques/auth"
 	"github.com/jokellih/jacques/backend"
 	_ "github.com/jokellih/jacques/backend/csv"
 	_ "github.com/jokellih/jacques/backend/duckdb"
@@ -17,11 +21,27 @@ import (
 	"github.com/jokellih/jacques/cache"
 	"github.com/jokellih/jacques/config"
 	"github.com/jokellih/jacques/data"
+	"github.com/jokellih/jacques/harness"
 	"github.com/jokellih/jacques/logging"
 	"github.com/jokellih/jacques/render"
+	"github.com/jokellih/jacques/server"
 )
 
+const (
+	ansiDim   = "\x1b[38;5;241m"
+	ansiBold  = "\x1b[1;38;5;39m"
+	ansiGreen = "\x1b[38;5;35m"
+	ansiEnd   = "\x1b[0m"
+)
+
+func status(icon, msg string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, ansiDim+icon+" "+msg+ansiEnd+"\n", args...)
+}
+
 var buildVersion = "dev"
+
+//go:embed all:webui
+var webFS embed.FS
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "version" {
@@ -34,6 +54,10 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "cache" {
 		handleCache(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "serve" {
+		handleServe(os.Args[2:])
 		return
 	}
 
@@ -120,7 +144,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "       jacques -c <connection> <KQL query>")
 		fmt.Fprintln(os.Stderr, "       jacques config list")
 		fmt.Fprintln(os.Stderr, "       jacques config init")
-		fmt.Fprintln(os.Stderr, "       jacques config set-token <connection-name>")
 		os.Exit(1)
 	}
 
@@ -129,6 +152,8 @@ func main() {
 		logging.String("connection", resolved.Name),
 		logging.String("type", resolved.Type),
 	)
+
+	status("→", "%s/%s", resolved.Name, resolved.Database)
 
 	// Open cache
 	useCache := !*noCache
@@ -149,14 +174,25 @@ func main() {
 	if useCache && !*refresh {
 		if cached, ok := dc.Get(ctx, resolved.Name, kql); ok {
 			store = cached
-			logging.Info(ctx, "serving from cache",
-				logging.Int("rows", store.RowCount()),
-			)
+			status("✓", "cache hit — %s%d rows%s", ansiBold, store.RowCount(), ansiDim)
 		}
 	}
 
 	// Cache miss — query backend
 	if store == nil {
+		if *refresh {
+			status("↻", "refresh requested, skipping cache")
+		} else if useCache {
+			status("○", "cache miss")
+		}
+
+		token, err := auth.GetToken(ctx, resolved)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		resolved.Token = token
+
 		be, err := backend.New(resolved)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -164,12 +200,16 @@ func main() {
 		}
 		defer be.Close()
 
+		sp := render.NewSpinner("querying " + resolved.Name)
 		store, err = be.Query(ctx, kql)
+		elapsed := sp.Stop()
 		if err != nil {
 			logging.Error(ctx, "query failed", logging.String("error", err.Error()))
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
+
+		status("✓", "%s%d rows%s in %s", ansiBold, store.RowCount(), ansiDim, elapsed.Truncate(time.Millisecond))
 
 		if useCache {
 			if err := dc.Put(ctx, resolved.Name, kql, store); err != nil {
@@ -178,11 +218,6 @@ func main() {
 		}
 	}
 	defer store.Close()
-
-	logging.Info(ctx, "query returned",
-		logging.Int("columns", len(store.Columns())),
-		logging.Int("rows", store.RowCount()),
-	)
 
 	w := os.Stdout
 
@@ -211,6 +246,14 @@ func main() {
 		if *tuiCols != "" {
 			tuiOpts.Columns = strings.Split(*tuiCols, ",")
 		}
+		if h := initHarness(cfg); h != nil {
+			render.PreviewHook = func(s data.RowStore, row, col int) {
+				content := cellToPreview(s, row, col)
+				if err := h.Preview(content); err != nil {
+					logging.Warn(ctx, "preview failed", logging.String("error", err.Error()))
+				}
+			}
+		}
 		render.TUI(store, tuiOpts)
 
 	case "raw":
@@ -226,12 +269,43 @@ func main() {
 }
 
 // ---------------------------------------------------------------------------
+// serve subcommand
+// ---------------------------------------------------------------------------
+
+func handleServe(args []string) {
+	loadEnv(".env")
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v (using defaults)\n", err)
+		cfg = &config.Config{}
+	}
+
+	port := 8080
+	if len(args) > 0 {
+		p, err := strconv.Atoi(args[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid port %q: %v\n", args[0], err)
+			os.Exit(2)
+		}
+		port = p
+	}
+
+	srv := server.New(cfg, webFS)
+	defer srv.Close()
+	if err := srv.ListenAndServe(port); err != nil {
+		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // cache subcommand
 // ---------------------------------------------------------------------------
 
 func handleCache(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: jacques cache <list|clear|query|path>")
+		fmt.Fprintln(os.Stderr, "usage: jacques cache <list|show|clear|query|path>")
 		os.Exit(1)
 	}
 
@@ -259,20 +333,63 @@ func handleCache(args []string) {
 			return
 		}
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "CONN\tROWS\tCOLS\tAGE\tQUERY")
-		fmt.Fprintln(tw, "----\t----\t----\t---\t-----")
-		for _, e := range entries {
+		fmt.Fprintln(tw, "#\tCONN\tROWS\tCOLS\tAGE\tTABLE\tQUERY")
+		fmt.Fprintln(tw, "-\t----\t----\t----\t---\t-----\t-----")
+		for i, e := range entries {
 			age := time.Since(e.Timestamp).Truncate(time.Second)
 			query := e.Query
+			query = strings.ReplaceAll(query, "\n", " ")
+			query = strings.ReplaceAll(query, "\r", "")
 			if len(query) > 60 {
 				query = query[:59] + "…"
 			}
-			query = strings.ReplaceAll(query, "\n", " ")
-			query = strings.ReplaceAll(query, "\r", "")
-			fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%s\n",
-				e.Conn, e.Rows, e.Cols, age, query)
+			tblName := strings.TrimSuffix(e.Key, ".json.gz")
+			if !strings.HasPrefix(tblName, "cache_") {
+				tblName = "cache_" + tblName
+			}
+			fmt.Fprintf(tw, "%d\t%s\t%d\t%d\t%s\t%s\t%s\n",
+				i+1, e.Conn, e.Rows, e.Cols, age, tblName, query)
 		}
 		tw.Flush()
+
+	case "show":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: jacques cache show <#>")
+			fmt.Fprintln(os.Stderr, "  show full query for a cache entry (use 'jacques cache list' to see #)")
+			os.Exit(1)
+		}
+		var idx int
+		if _, err := fmt.Sscanf(args[1], "%d", &idx); err != nil || idx < 1 {
+			fmt.Fprintf(os.Stderr, "error: invalid entry number %q\n", args[1])
+			os.Exit(1)
+		}
+		dc, err := cache.NewDuckCache()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		defer dc.Close()
+
+		entries, err := dc.List(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if idx > len(entries) {
+			fmt.Fprintf(os.Stderr, "error: entry #%d not found (have %d entries)\n", idx, len(entries))
+			os.Exit(1)
+		}
+		e := entries[idx-1]
+		tblName := strings.TrimSuffix(e.Key, ".json.gz")
+		if !strings.HasPrefix(tblName, "cache_") {
+			tblName = "cache_" + tblName
+		}
+		fmt.Fprintf(os.Stderr, "connection: %s\n", e.Conn)
+		fmt.Fprintf(os.Stderr, "table:      %s\n", tblName)
+		fmt.Fprintf(os.Stderr, "rows:       %d\n", e.Rows)
+		fmt.Fprintf(os.Stderr, "cached:     %s ago\n", time.Since(e.Timestamp).Truncate(time.Second))
+		fmt.Fprintf(os.Stderr, "---\n")
+		fmt.Println(e.Query)
 
 	case "clear":
 		dc, err := cache.NewDuckCache()
@@ -314,7 +431,7 @@ func handleCache(args []string) {
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown cache command: %s\n", args[0])
-		fmt.Fprintln(os.Stderr, "usage: jacques cache <list|clear|query|path>")
+		fmt.Fprintln(os.Stderr, "usage: jacques cache <list|show|clear|query|path>")
 		os.Exit(1)
 	}
 }
@@ -325,7 +442,7 @@ func handleCache(args []string) {
 
 func handleConfig(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: jacques config <list|init|set|set-token|path>")
+		fmt.Fprintln(os.Stderr, "usage: jacques config <list|init|use|set|path>")
 		os.Exit(1)
 	}
 
@@ -353,26 +470,66 @@ func handleConfig(args []string) {
 			os.Exit(1)
 		}
 
-		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "DEFAULT\tNAME\tTYPE\tCLUSTER\tDATABASE\tTOKEN")
-		fmt.Fprintln(tw, "-------\t----\t----\t-------\t--------\t-----")
-		for _, c := range cfg.Connections {
-			def := ""
-			if c.Name == cfg.DefaultConnection {
-				def = "*"
+		if len(args) > 1 && args[1] == "--json" {
+			type connJSON struct {
+				Current  bool   `json:"current"`
+				Name     string `json:"name"`
+				Type     string `json:"type"`
+				Cluster  string `json:"cluster,omitempty"`
+				Database string `json:"database,omitempty"`
+				Path     string `json:"path,omitempty"`
+				Auth     string `json:"auth"`
+				Scopes   string `json:"scopes,omitempty"`
 			}
-			tokenStatus := "missing"
-			if c.Token != "" {
-				tokenStatus = "set (" + fmt.Sprintf("%d chars", len(c.Token)) + ")"
+			var out []connJSON
+			for _, c := range cfg.Connections {
+				auth := "-"
+				if c.Scopes != "" {
+					auth = c.TokenProvider
+					if auth == "" {
+						auth = "az"
+					}
+				}
+				out = append(out, connJSON{
+					Current:  c.Name == cfg.CurrentConnection,
+					Name:     c.Name,
+					Type:     c.Type,
+					Cluster:  c.Cluster,
+					Database: c.Database,
+					Path:     c.Path,
+					Auth:     auth,
+					Scopes:   c.Scopes,
+				})
 			}
-			endpoint := c.Cluster
-			if c.Path != "" {
-				endpoint = c.Path
+			b, _ := json.MarshalIndent(out, "", "  ")
+			fmt.Println(string(b))
+		} else {
+			tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(tw, "DEFAULT\tNAME\tTYPE\tCLUSTER\tDATABASE\tAUTH")
+			fmt.Fprintln(tw, "-------\t----\t----\t-------\t--------\t----")
+			for _, c := range cfg.Connections {
+				def := ""
+				if c.Name == cfg.CurrentConnection {
+					def = "*"
+				}
+				authStatus := "-"
+				if c.Scopes != "" {
+					switch c.TokenProvider {
+					case "az", "":
+						authStatus = "az"
+					default:
+						authStatus = c.TokenProvider
+					}
+				}
+				endpoint := c.Cluster
+				if c.Path != "" {
+					endpoint = c.Path
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+					def, c.Name, c.Type, endpoint, c.Database, authStatus)
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-				def, c.Name, c.Type, endpoint, c.Database, tokenStatus)
+			tw.Flush()
 		}
-		tw.Flush()
 
 	case "set":
 		if len(args) < 4 {
@@ -385,9 +542,9 @@ func handleConfig(args []string) {
 		field := args[2]
 		value := args[3]
 
-		validFields := map[string]bool{"cluster": true, "database": true, "token": true, "path": true}
+		validFields := map[string]bool{"cluster": true, "database": true, "path": true, "token_provider": true, "tenant_id": true, "client_id": true, "scopes": true}
 		if !validFields[field] {
-			fmt.Fprintf(os.Stderr, "error: unknown field %q (valid: cluster, database, token, path)\n", field)
+			fmt.Fprintf(os.Stderr, "error: unknown field %q (valid: cluster, database, path, token_provider, tenant_id, client_id, scopes)\n", field)
 			os.Exit(1)
 		}
 
@@ -403,10 +560,9 @@ func handleConfig(args []string) {
 		}
 		fmt.Printf("%s.%s updated in %s\n", connName, field, config.Path())
 
-	case "set-token":
+	case "use":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: jacques config set-token <connection-name>")
-			fmt.Fprintln(os.Stderr, "  reads token from stdin or KUSTO_TOKEN env var")
+			fmt.Fprintln(os.Stderr, "usage: jacques config use <connection-name>")
 			os.Exit(1)
 		}
 		connName := args[1]
@@ -415,41 +571,27 @@ func handleConfig(args []string) {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		c := cfg.FindConnection(connName)
-		if c == nil {
+		if cfg.FindConnection(connName) == nil {
 			fmt.Fprintf(os.Stderr, "error: connection %q not found\n", connName)
+			fmt.Fprintln(os.Stderr, "run: jacques config list")
 			os.Exit(1)
 		}
 
-		token := os.Getenv("KUSTO_TOKEN")
-		if token == "" {
-			fmt.Fprint(os.Stderr, "paste token: ")
-			scanner := bufio.NewScanner(os.Stdin)
-			if scanner.Scan() {
-				token = strings.TrimSpace(scanner.Text())
-			}
-		}
-		if token == "" {
-			fmt.Fprintln(os.Stderr, "error: no token provided")
-			os.Exit(1)
-		}
-
-		// Rewrite the config file with the updated token
 		raw, err := os.ReadFile(config.Path())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error reading config: %v\n", err)
 			os.Exit(1)
 		}
-		updated := replaceFieldInConfig(string(raw), connName, "token", token)
+		updated := replaceTopLevelField(string(raw), "current_connection", connName)
 		if err := os.WriteFile(config.Path(), []byte(updated), 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "error writing config: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("token updated for connection %q in %s\n", connName, config.Path())
+		fmt.Printf("switched to %s\n", connName)
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown config command: %s\n", args[0])
-		fmt.Fprintln(os.Stderr, "usage: jacques config <list|init|set|set-token|path>")
+		fmt.Fprintln(os.Stderr, "usage: jacques config <list|init|use|set|path>")
 		os.Exit(1)
 	}
 }
@@ -492,6 +634,18 @@ func replaceFieldInConfig(content, connName, field, value string) string {
 	return strings.Join(lines, "\n")
 }
 
+func replaceTopLevelField(content, field, value string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, field) && strings.Contains(trimmed, "=") {
+			lines[i] = fmt.Sprintf("%s = %q", field, value)
+			return strings.Join(lines, "\n")
+		}
+	}
+	return fmt.Sprintf("%s = %q\n", field, value) + content
+}
+
 // ---------------------------------------------------------------------------
 // resolution helpers
 // ---------------------------------------------------------------------------
@@ -518,9 +672,6 @@ func resolveConnection(connCfg *config.Connection, clusterFlag, dbFlag string) c
 	}
 	if c.Database == "" {
 		c.Database = os.Getenv("KUSTO_DATABASE")
-	}
-	if c.Token == "" {
-		c.Token = os.Getenv("KUSTO_TOKEN")
 	}
 	return c
 }
@@ -557,6 +708,52 @@ func configLevelCol(cfg *config.Config) string {
 		return cfg.Display.LevelCol
 	}
 	return ""
+}
+
+// ---------------------------------------------------------------------------
+// preview harness
+// ---------------------------------------------------------------------------
+
+func initHarness(cfg *config.Config) harness.PreviewHarness {
+	name := ""
+	if cfg.Display != nil {
+		name = cfg.Display.Harness
+	}
+	switch name {
+	case "nvim":
+		h, err := harness.NewNvim()
+		if err != nil {
+			status("!", "nvim harness: %v", err)
+			return nil
+		}
+		return h
+	case "":
+		return nil
+	default:
+		status("!", "unknown harness %q", name)
+		return nil
+	}
+}
+
+func cellToPreview(store data.RowStore, rowIdx, colIdx int) string {
+	row, err := store.Row(rowIdx)
+	if err != nil {
+		return fmt.Sprintf("error: %v", err)
+	}
+	if colIdx >= len(row) {
+		return ""
+	}
+	val := row[colIdx]
+	b, err := json.MarshalIndent(val, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%v", val)
+	}
+	// Unwrap plain strings so they don't show with quotes
+	var s string
+	if json.Unmarshal(b, &s) == nil && string(b[0]) == `"` {
+		return s
+	}
+	return string(b)
 }
 
 func loadEnv(path string) {

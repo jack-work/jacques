@@ -1,0 +1,16 @@
+// Correlation: 4a820c6e-fbe0-471b-bb00-9cc78eeba8ef
+// ServiceRequestId: c5cafee1-ab3a-48fb-9679-e3c5d3fd194d
+// Root cause: RP KeyNotFoundException on 'accounts/msmanaged-na'
+let _start = datetime(2026-05-18T16:52:30Z);
+let _end   = datetime(2026-05-18T16:53:30Z);
+let _cid   = "4a820c6e-fbe0-471b-bb00-9cc78eeba8ef";
+let _srid  = "c5cafee1-ab3a-48fb-9679-e3c5d3fd194d";
+union
+    (OperationEvents | extend _src = "Op"),
+    (TraceEvents | extend _src = "Tr")
+| where env_time between (_start .. _end)
+| where correlationId == _cid or serviceRequestId == _srid
+| project env_time, _src, applicationName, correlationId, serviceRequestId,
+          activityName, activityVector, traceLevel, eventType, resultType,
+          durationMs, exceptionTypeName, message, customDimensions
+| order by env_time asc

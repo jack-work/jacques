@@ -14,10 +14,10 @@ import (
 	"golang.org/x/term"
 )
 
-// PreviewHook is called when the user presses Enter on a row.
-// It receives the row index and the full RowStore.
+// PreviewHook is called when the user presses Enter on a cell.
+// It receives the row index, column index, and the full RowStore.
 // If nil, Enter is a no-op with a status message.
-var PreviewHook func(store data.RowStore, row int)
+var PreviewHook func(store data.RowStore, row, col int)
 
 type TUIOptions struct {
 	Height     int
@@ -66,7 +66,41 @@ func TUI(store data.RowStore, opts TUIOptions) {
 // ---------------------------------------------------------------------------
 
 type searchMatch struct {
-	row, col int
+	row, col int // row == -1 means column header match
+}
+
+type searchOpts struct {
+	pattern     string
+	columnOnly  bool
+	caseSensitive bool
+}
+
+func parseSearchQuery(raw string) searchOpts {
+	opts := searchOpts{caseSensitive: false}
+	var pat strings.Builder
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '\\' && i+1 < len(raw) {
+			next := raw[i+1]
+			switch next {
+			case 'j':
+				opts.columnOnly = true
+			case 'c':
+				opts.caseSensitive = false
+			case 'C':
+				opts.caseSensitive = true
+			case '\\':
+				pat.WriteByte('\\')
+			default:
+				pat.WriteByte('\\')
+				pat.WriteByte(next)
+			}
+			i++
+		} else {
+			pat.WriteByte(raw[i])
+		}
+	}
+	opts.pattern = pat.String()
+	return opts
 }
 
 type model struct {
@@ -189,11 +223,11 @@ func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "esc":
-		if m.expandedCol >= 0 {
-			m.expandedCol = -1
-		} else if m.searchQuery != "" {
+		if m.searchQuery != "" {
 			m.searchQuery = ""
 			m.searchMatches = nil
+		} else if m.expandedCol >= 0 {
+			m.expandedCol = -1
 		} else {
 			return m, tea.Quit
 		}
@@ -249,7 +283,7 @@ func (m *model) handleTableKey(key string) (tea.Model, tea.Cmd) {
 	// preview (hook for vim harness)
 	case "enter":
 		if PreviewHook != nil {
-			PreviewHook(m.store, m.cursorRow)
+			PreviewHook(m.store, m.cursorRow, m.cursorCol)
 		} else {
 			m.statusMsg = "no preview harness attached"
 		}
@@ -327,11 +361,30 @@ func (m *model) runSearch() {
 	if m.searchQuery == "" {
 		return
 	}
-	q := strings.ToLower(m.searchQuery)
-	for r, row := range m.cells {
-		for c, cell := range row {
-			if strings.Contains(strings.ToLower(cell), q) {
-				m.searchMatches = append(m.searchMatches, searchMatch{r, c})
+	opts := parseSearchQuery(m.searchQuery)
+	if opts.pattern == "" {
+		return
+	}
+
+	contains := func(haystack, needle string) bool {
+		if opts.caseSensitive {
+			return strings.Contains(haystack, needle)
+		}
+		return strings.Contains(strings.ToLower(haystack), strings.ToLower(needle))
+	}
+
+	if opts.columnOnly {
+		for c, col := range m.filtered.Columns() {
+			if contains(col.Name, opts.pattern) {
+				m.searchMatches = append(m.searchMatches, searchMatch{-1, c})
+			}
+		}
+	} else {
+		for r, row := range m.cells {
+			for c, cell := range row {
+				if contains(cell, opts.pattern) {
+					m.searchMatches = append(m.searchMatches, searchMatch{r, c})
+				}
 			}
 		}
 	}
@@ -356,7 +409,9 @@ func (m *model) jumpToMatch() {
 		return
 	}
 	match := m.searchMatches[m.searchIdx]
-	m.cursorRow = match.row
+	if match.row >= 0 {
+		m.cursorRow = match.row
+	}
 	m.cursorCol = match.col
 	m.clampScroll()
 }
@@ -526,8 +581,11 @@ func (m *model) writeHeaderRow(b *strings.Builder, colStart, colEnd int) {
 			b.WriteString(ansiWrap(ansiSep, " │ "))
 		}
 		w := m.displayWidth(c)
-		title := m.filtered.Columns()[c].Name
-		b.WriteString(ansiWrap(ansiHeader, padOrTruncate(title, w)))
+		title := padOrTruncate(m.filtered.Columns()[c].Name, w)
+		if m.isColSearchMatch(c) {
+			title = m.highlightSearch(title)
+		}
+		b.WriteString(ansiWrap(ansiHeader, title))
 	}
 }
 
@@ -646,6 +704,15 @@ func (m *model) statusBar() string {
 // search highlighting
 // ---------------------------------------------------------------------------
 
+func (m *model) isColSearchMatch(col int) bool {
+	for _, sm := range m.searchMatches {
+		if sm.row == -1 && sm.col == col {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *model) isCellSearchMatch(row, col int) bool {
 	if m.searchQuery == "" {
 		return false
@@ -658,13 +725,26 @@ func (m *model) isCellSearchMatch(row, col int) bool {
 	return false
 }
 
-func (m *model) highlightSearch(text string) string {
+func (m *model) searchPattern() string {
 	if m.searchQuery == "" {
+		return ""
+	}
+	return parseSearchQuery(m.searchQuery).pattern
+}
+
+func (m *model) highlightSearch(text string) string {
+	pat := m.searchPattern()
+	if pat == "" {
 		return text
 	}
-	q := strings.ToLower(m.searchQuery)
-	lower := strings.ToLower(text)
-	idx := strings.Index(lower, q)
+	opts := parseSearchQuery(m.searchQuery)
+	haystack := text
+	needle := pat
+	if !opts.caseSensitive {
+		haystack = strings.ToLower(text)
+		needle = strings.ToLower(pat)
+	}
+	idx := strings.Index(haystack, needle)
 	if idx < 0 {
 		return text
 	}
@@ -672,13 +752,13 @@ func (m *model) highlightSearch(text string) string {
 	var b strings.Builder
 	for idx >= 0 {
 		b.WriteString(text[:idx])
-		matchEnd := idx + len(m.searchQuery)
+		matchEnd := idx + len(pat)
 		b.WriteString(ansiSearchHL)
 		b.WriteString(text[idx:matchEnd])
 		b.WriteString(ansiReset)
 		text = text[matchEnd:]
-		lower = lower[matchEnd:]
-		idx = strings.Index(lower, q)
+		haystack = haystack[matchEnd:]
+		idx = strings.Index(haystack, needle)
 	}
 	b.WriteString(text)
 	return b.String()
@@ -787,7 +867,7 @@ func buildCells(store data.RowStore, opts TUIOptions) [][]string {
 			if c < len(cols) {
 				colType = cols[c].Type
 			}
-			cells[r][c] = formatValue(val, colType, tableOpts)
+			cells[r][c] = FormatValue(val, colType, tableOpts)
 		}
 	}
 	return cells

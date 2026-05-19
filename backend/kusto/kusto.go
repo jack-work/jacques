@@ -21,7 +21,7 @@ type Backend struct {
 
 func New(conn config.Connection) (backend.Backend, error) {
 	if conn.Token == "" {
-		return nil, fmt.Errorf("kusto connection %q: no token available\n  set it with: jacques config set-token %s", conn.Name, conn.Name)
+		return nil, fmt.Errorf("kusto connection %q: no token available (configure tenant_id, client_id, scopes in config)", conn.Name)
 	}
 	if conn.Cluster == "" {
 		return nil, fmt.Errorf("kusto connection %q: no cluster URL configured", conn.Name)

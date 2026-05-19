@@ -9,7 +9,7 @@ import (
 )
 
 type Config struct {
-	DefaultConnection string       `hcl:"default_connection,optional"`
+	CurrentConnection string       `hcl:"current_connection,optional"`
 	Connections       []Connection `hcl:"connection,block"`
 	Display           *Display     `hcl:"display,block"`
 }
@@ -19,8 +19,14 @@ type Connection struct {
 	Name     string `hcl:"name,label"`
 	Cluster  string `hcl:"cluster,optional"`
 	Database string `hcl:"database,optional"`
-	Token    string `hcl:"token,optional"`
 	Path     string `hcl:"path,optional"`
+
+	TokenProvider string `hcl:"token_provider,optional"` // "az" or "" (oauth device code)
+	TenantID      string `hcl:"tenant_id,optional"`
+	ClientID      string `hcl:"client_id,optional"`
+	Scopes        string `hcl:"scopes,optional"`
+
+	Token string `json:"-"` // runtime only, set by auth package
 }
 
 type Display struct {
@@ -29,6 +35,7 @@ type Display struct {
 	MsgCol   string `hcl:"msg_col,optional"`
 	LevelCol string `hcl:"level_col,optional"`
 	MaxRows  int    `hcl:"max_rows,optional"`
+	Harness  string `hcl:"harness,optional"`
 }
 
 func Dir() string {
@@ -66,8 +73,8 @@ func (c *Config) FindConnection(name string) *Connection {
 }
 
 func (c *Config) DefaultConn() *Connection {
-	if c.DefaultConnection != "" {
-		return c.FindConnection(c.DefaultConnection)
+	if c.CurrentConnection != "" {
+		return c.FindConnection(c.CurrentConnection)
 	}
 	if len(c.Connections) > 0 {
 		return &c.Connections[0]
@@ -100,18 +107,20 @@ func WriteDefault() error {
 	return os.WriteFile(path, []byte(defaultConfig), 0o644)
 }
 
-const defaultConfig = `default_connection = "cap-analytics"
+const defaultConfig = `current_connection = "cap-analytics"
 
 connection "kusto" "cap-analytics" {
-  cluster  = "https://fdislandsus.centralus.kusto.windows.net"
-  database = "CAPAnalytics"
-  token    = ""
+  cluster        = "https://fdislandsus.centralus.kusto.windows.net"
+  database       = "CAPAnalytics"
+  token_provider = "az"
+  scopes         = "https://help.kusto.windows.net/.default"
 }
 
 connection "kusto" "nsp-logs" {
-  cluster  = "https://nsp-logs-summary.eastus.kusto.windows.net"
-  database = ""
-  token    = ""
+  cluster        = "https://nsp-logs-summary.eastus.kusto.windows.net"
+  database       = ""
+  token_provider = "az"
+  scopes         = "https://help.kusto.windows.net/.default"
 }
 
 connection "csv" "sample" {

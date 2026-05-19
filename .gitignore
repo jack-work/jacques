@@ -7,3 +7,4 @@
 *.md
 !plans/*.md
 !README.md
+stderr.log

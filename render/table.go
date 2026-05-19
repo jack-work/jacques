@@ -50,7 +50,7 @@ func Table(w io.Writer, store data.RowStore, opts TableOptions) {
 		row, _ := store.Row(r)
 		cells[r] = make([]string, len(cols))
 		for c, val := range row {
-			cells[r][c] = formatValue(val, colTypes[c], opts)
+			cells[r][c] = FormatValue(val, colTypes[c], opts)
 		}
 	}
 
@@ -65,7 +65,7 @@ func Table(w io.Writer, store data.RowStore, opts TableOptions) {
 	fmt.Fprintf(w, "\n(%d rows)\n", rowCount)
 }
 
-func formatValue(val interface{}, colType string, opts TableOptions) string {
+func FormatValue(val interface{}, colType string, opts TableOptions) string {
 	if val == nil {
 		return ""
 	}
@@ -104,11 +104,18 @@ func formatValue(val interface{}, colType string, opts TableOptions) string {
 		}
 	}
 
-	switch val.(type) {
-	case map[string]interface{}, []interface{}:
-		return formatJSON(val)
+	b, err := json.Marshal(val)
+	if err != nil {
+		return fmt.Sprintf("%v", val)
 	}
-	return fmt.Sprintf("%v", val)
+	s := string(b)
+	if s != "" && s[0] == '"' {
+		var unq string
+		if json.Unmarshal(b, &unq) == nil {
+			return unq
+		}
+	}
+	return s
 }
 
 func formatJSON(v interface{}) string {

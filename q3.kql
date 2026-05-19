@@ -1,0 +1,7 @@
+let startTime = startofday(ago(7d));
+let endTime = startofday(now());
+OperationEvents
+| union TraceEvents
+| where env_time between (startTime..endTime)
+  and applicationName == "fabric:/PowerApps.Authoring.Orchard"
+  and correlationId == "16997ba2-8d92-467e-99ae-94b3921581c3"

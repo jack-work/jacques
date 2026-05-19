@@ -16,31 +16,45 @@ import (
 	_ "github.com/duckdb/duckdb-go/v2"
 )
 
-type DuckCache struct {
-	db *sql.DB
-}
+// DuckCache provides query result caching backed by DuckDB.
+// Connections are opened on demand and released immediately after each
+// operation so that multiple processes can access the cache concurrently.
+type DuckCache struct{}
 
 func NewDuckCache() (*DuckCache, error) {
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return nil, err
 	}
-
-	dbPath := DuckDBPath()
-	db, err := sql.Open("duckdb", dbPath)
+	db, err := openRW()
 	if err != nil {
-		return nil, fmt.Errorf("open cache db %q: %w", dbPath, err)
-	}
-
-	if err := initSchema(db); err != nil {
-		db.Close()
 		return nil, err
 	}
-
-	return &DuckCache{db: db}, nil
+	err = initSchema(db)
+	db.Close()
+	if err != nil {
+		return nil, err
+	}
+	return &DuckCache{}, nil
 }
 
 func DuckDBPath() string {
 	return config.Dir() + "/cache.duckdb"
+}
+
+func openRW() (*sql.DB, error) {
+	db, err := sql.Open("duckdb", DuckDBPath())
+	if err != nil {
+		return nil, fmt.Errorf("open cache db %q: %w", DuckDBPath(), err)
+	}
+	return db, nil
+}
+
+func openRO() (*sql.DB, error) {
+	db, err := sql.Open("duckdb", DuckDBPath()+"?access_mode=read_only")
+	if err != nil {
+		return nil, fmt.Errorf("open cache db (ro) %q: %w", DuckDBPath(), err)
+	}
+	return db, nil
 }
 
 func initSchema(db *sql.DB) error {
@@ -59,9 +73,7 @@ func initSchema(db *sql.DB) error {
 	return err
 }
 
-func (c *DuckCache) Close() error {
-	return c.db.Close()
-}
+func (c *DuckCache) Close() error { return nil }
 
 func tableKey(connName, query string) string {
 	h := sha256.Sum256([]byte(connName + "\x00" + query))
@@ -73,22 +85,24 @@ func tableName(key string) string {
 }
 
 func (c *DuckCache) Get(ctx context.Context, connName, query string) (data.RowStore, bool) {
+	db, err := openRO()
+	if err != nil {
+		return nil, false
+	}
+	defer db.Close()
+
 	key := tableKey(connName, query)
 	tbl := tableName(key)
 
 	var rowCount int
-	err := c.db.QueryRowContext(ctx,
+	err = db.QueryRowContext(ctx,
 		"SELECT row_count FROM cache_meta WHERE key = ?", key,
 	).Scan(&rowCount)
 	if err != nil {
 		return nil, false
 	}
 
-	// Touch accessed_at
-	c.db.ExecContext(ctx,
-		"UPDATE cache_meta SET accessed_at = current_timestamp WHERE key = ?", key)
-
-	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("SELECT * FROM %s", tbl))
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT * FROM %s", tbl))
 	if err != nil {
 		return nil, false
 	}
@@ -105,29 +119,43 @@ func (c *DuckCache) Get(ctx context.Context, connName, query string) (data.RowSt
 		logging.Int("rows", store.RowCount()),
 	)
 
+	// Touch accessed_at in a brief write connection
+	go func() {
+		wdb, err := openRW()
+		if err != nil {
+			return
+		}
+		defer wdb.Close()
+		wdb.ExecContext(context.Background(),
+			"UPDATE cache_meta SET accessed_at = current_timestamp WHERE key = ?", key)
+	}()
+
 	return store, true
 }
 
 func (c *DuckCache) Put(ctx context.Context, connName, query string, store data.RowStore) error {
+	db, err := openRW()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
 	key := tableKey(connName, query)
 	tbl := tableName(key)
 	cols := store.Columns()
 
-	// Drop existing table
-	c.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tbl))
-	c.db.ExecContext(ctx, "DELETE FROM cache_meta WHERE key = ?", key)
+	db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tbl))
+	db.ExecContext(ctx, "DELETE FROM cache_meta WHERE key = ?", key)
 
-	// Build CREATE TABLE
 	var colDefs []string
 	for _, col := range cols {
 		colDefs = append(colDefs, fmt.Sprintf("%s VARCHAR", quoteIdent(col.Name)))
 	}
 	createSQL := fmt.Sprintf("CREATE TABLE %s (%s)", tbl, strings.Join(colDefs, ", "))
-	if _, err := c.db.ExecContext(ctx, createSQL); err != nil {
+	if _, err := db.ExecContext(ctx, createSQL); err != nil {
 		return fmt.Errorf("create cache table: %w", err)
 	}
 
-	// Insert rows in batches
 	if store.RowCount() > 0 {
 		placeholders := "(" + strings.Repeat("?,", len(cols)-1) + "?)"
 		batchSize := 1000
@@ -152,14 +180,13 @@ func (c *DuckCache) Put(ctx context.Context, connName, query string, store data.
 
 			insertSQL := fmt.Sprintf("INSERT INTO %s VALUES %s",
 				tbl, strings.Join(valueClauses, ", "))
-			if _, err := c.db.ExecContext(ctx, insertSQL, args...); err != nil {
+			if _, err := db.ExecContext(ctx, insertSQL, args...); err != nil {
 				return fmt.Errorf("insert cache rows: %w", err)
 			}
 		}
 	}
 
-	// Update metadata
-	c.db.ExecContext(ctx,
+	db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO cache_meta (key, conn_name, query, table_name, row_count, col_count)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		key, connName, query, tbl, store.RowCount(), len(cols))
@@ -174,7 +201,13 @@ func (c *DuckCache) Put(ctx context.Context, connName, query string, store data.
 }
 
 func (c *DuckCache) List(ctx context.Context) ([]CacheEntry, error) {
-	rows, err := c.db.QueryContext(ctx,
+	db, err := openRO()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(ctx,
 		"SELECT key, conn_name, query, row_count, col_count, created_at, accessed_at FROM cache_meta ORDER BY accessed_at DESC")
 	if err != nil {
 		return nil, err
@@ -195,7 +228,13 @@ func (c *DuckCache) List(ctx context.Context) ([]CacheEntry, error) {
 }
 
 func (c *DuckCache) Clear(ctx context.Context) error {
-	rows, err := c.db.QueryContext(ctx, "SELECT table_name FROM cache_meta")
+	db, err := openRW()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(ctx, "SELECT table_name FROM cache_meta")
 	if err != nil {
 		return err
 	}
@@ -209,15 +248,20 @@ func (c *DuckCache) Clear(ctx context.Context) error {
 	}
 
 	for _, tbl := range tables {
-		c.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tbl))
+		db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", tbl))
 	}
-	_, err = c.db.ExecContext(ctx, "DELETE FROM cache_meta")
+	_, err = db.ExecContext(ctx, "DELETE FROM cache_meta")
 	return err
 }
 
-// QueryCache runs SQL directly against cached results
-func (c *DuckCache) QueryCache(ctx context.Context, sql string) (data.RowStore, error) {
-	rows, err := c.db.QueryContext(ctx, sql)
+func (c *DuckCache) QueryCache(ctx context.Context, sqlStr string) (data.RowStore, error) {
+	db, err := openRO()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(ctx, sqlStr)
 	if err != nil {
 		return nil, err
 	}
