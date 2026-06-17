@@ -39,13 +39,6 @@ Install it and log in before first use:
 az login
 ```
 
-**hush** -- jacques encrypts cached tokens with [hush](https://github.com/jack-work/hush).
-The hush agent must be running:
-
-```powershell
-hush up -d
-```
-
 ### 3. Create a config
 
 ```powershell
@@ -235,18 +228,12 @@ and the same caching layer as the CLI.
 
 ## Auth
 
-Jacques acquires tokens through `az account get-access-token` and caches them
-encrypted via hush. The flow:
-
-1. Check hush-encrypted token cache (`~/.jacques/token-cache.toml`)
-2. If missing or expired, shell out to `az account get-access-token`
-3. Encrypt and cache the fresh token
+Jacques acquires tokens by shelling out to `az account get-access-token` on
+each run. Az cli manages its own token cache and refresh flow internally.
 
 **Troubleshooting:**
 
 - Empty stdout and immediate exit = expired `az login` session. Run `az login`.
-- "hush agent required" error = start the agent with `hush up -d`.
-- Token cache lives at `~/.jacques/token-cache.toml`. Delete it to force re-auth.
 
 ## Environment variables
 
@@ -290,7 +277,7 @@ specific telemetry workloads:
 ```
 main.go                  CLI entrypoint, flag parsing, subcommands
 config/                  HCL config loading (~/.jacques/config.hcl)
-auth/                    Token acquisition via az cli + hush-encrypted cache
+auth/                    Token acquisition via az cli
 backend/                 Backend interface + registry
   backend/kusto/         Azure Data Explorer HTTP backend
   backend/duckdb/        DuckDB SQL backend (local files, in-memory)
