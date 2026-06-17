@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jokellih/jacques/backend"
-	"github.com/jokellih/jacques/config"
-	"github.com/jokellih/jacques/data"
+	"github.com/jack-work/jacques/backend"
+	"github.com/jack-work/jacques/config"
+	"github.com/jack-work/jacques/data"
 )
 
 func init() {

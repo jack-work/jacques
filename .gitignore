@@ -3,9 +3,12 @@
 *.exe
 *.exe~
 *.py
-*.csv
-*.md
-!plans/*.md
-!README.md
 stderr.log
-stderr.log
+
+# Scratch queries and incident-specific data
+scratch.kql
+q*.kql
+tmp-*.kql
+tmp-*.md
+incident-queries/
+island301-*

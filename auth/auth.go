@@ -25,8 +25,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 	hushclient "github.com/jack-work/hush/client"
-	"github.com/jokellih/jacques/config"
-	"github.com/jokellih/jacques/logging"
+	"github.com/jack-work/jacques/config"
+	"github.com/jack-work/jacques/logging"
 )
 
 const expiryBuffer = 2 * time.Minute

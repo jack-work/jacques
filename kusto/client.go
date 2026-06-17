@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
-	"github.com/jokellih/jacques/data"
-	"github.com/jokellih/jacques/logging"
+	"github.com/jack-work/jacques/data"
+	"github.com/jack-work/jacques/logging"
 )
 
 type Client struct {

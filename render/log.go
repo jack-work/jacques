@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jokellih/jacques/data"
+	"github.com/jack-work/jacques/data"
 )
 
 type LogOptions struct {

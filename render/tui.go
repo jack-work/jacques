@@ -10,7 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/jokellih/jacques/data"
+	"github.com/jack-work/jacques/data"
 	"golang.org/x/term"
 )
 

@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jokellih/jacques/config"
-	"github.com/jokellih/jacques/data"
+	"github.com/jack-work/jacques/config"
+	"github.com/jack-work/jacques/data"
 )
 
 type Backend interface {

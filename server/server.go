@@ -13,12 +13,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jokellih/jacques/auth"
-	"github.com/jokellih/jacques/backend"
-	"github.com/jokellih/jacques/cache"
-	"github.com/jokellih/jacques/config"
-	"github.com/jokellih/jacques/data"
-	"github.com/jokellih/jacques/render"
+	"github.com/jack-work/jacques/auth"
+	"github.com/jack-work/jacques/backend"
+	"github.com/jack-work/jacques/cache"
+	"github.com/jack-work/jacques/config"
+	"github.com/jack-work/jacques/data"
+	"github.com/jack-work/jacques/render"
 )
 
 type Server struct {

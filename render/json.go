@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/jokellih/jacques/data"
+	"github.com/jack-work/jacques/data"
 )
 
 func JSON(w io.Writer, store data.RowStore) {

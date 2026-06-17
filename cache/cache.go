@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jokellih/jacques/config"
-	"github.com/jokellih/jacques/data"
-	"github.com/jokellih/jacques/logging"
+	"github.com/jack-work/jacques/config"
+	"github.com/jack-work/jacques/data"
+	"github.com/jack-work/jacques/logging"
 )
 
 type entry struct {

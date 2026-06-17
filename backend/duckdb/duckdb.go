@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/jokellih/jacques/backend"
-	"github.com/jokellih/jacques/config"
-	"github.com/jokellih/jacques/data"
-	"github.com/jokellih/jacques/logging"
+	"github.com/jack-work/jacques/backend"
+	"github.com/jack-work/jacques/config"
+	"github.com/jack-work/jacques/data"
+	"github.com/jack-work/jacques/logging"
 
 	_ "github.com/duckdb/duckdb-go/v2"
 )

@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jokellih/jacques/backend"
-	"github.com/jokellih/jacques/config"
-	"github.com/jokellih/jacques/data"
-	kustohttp "github.com/jokellih/jacques/kusto"
+	"github.com/jack-work/jacques/backend"
+	"github.com/jack-work/jacques/config"
+	"github.com/jack-work/jacques/data"
+	kustohttp "github.com/jack-work/jacques/kusto"
 )
 
 func init() {

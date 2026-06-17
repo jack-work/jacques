@@ -1,4 +1,4 @@
-module github.com/jokellih/jacques
+module github.com/jack-work/jacques
 
 go 1.25.5
 
