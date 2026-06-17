@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            ext: .exe
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            ext: ""
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            ext: ""
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          OUT="jacques-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          go build -trimpath \
+            -ldflags="-s -w -X main.buildVersion=${VERSION}" \
+            -o "${OUT}" .
+          echo "ARTIFACT=${OUT}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jacques-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ env.ARTIFACT }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            jacques-*
