@@ -28,9 +28,12 @@ elseif ($IsMacOS) { $os = "darwin" }
 else { $os = "windows" }
 
 $cpuArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLower()
-switch ($cpuArch) {
-    "arm64" { $arch = "arm64" }
-    default { $arch = "amd64" }
+if ($cpuArch -eq "arm64" -and $os -ne "windows") {
+    $arch = "arm64"
+} else {
+    # Windows ARM64 runs the x64 binary via emulation (DuckDB has no
+    # pre-built windows-arm64 static lib yet).
+    $arch = "amd64"
 }
 
 $ext = if ($os -eq "windows") { ".exe" } else { "" }
