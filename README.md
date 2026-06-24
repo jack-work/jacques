@@ -12,7 +12,7 @@ CSV query tool.
 **One-liner** (PowerShell -- works on Windows, macOS, Linux):
 
 ```powershell
-irm https://raw.githubusercontent.com/jack-work/jacques/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/jack-work/jacques/master/install.ps1 | iex
 ```
 
 This downloads the latest release binary to `~/.jacques/bin` and adds it to
@@ -21,7 +21,7 @@ your PATH.
 To install a specific version:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/jack-work/jacques/main/install.ps1))) -Version v0.1.0
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/jack-work/jacques/master/install.ps1))) -Version v0.1.0
 ```
 
 **From source** (requires Go 1.25+):
