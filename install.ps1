@@ -23,8 +23,16 @@ if (-not $Version) {
     Write-Host "Latest version: $Version"
 }
 
-$os = if ($IsLinux) { "linux" } elseif ($IsMacOS) { "darwin" } else { "windows" }
-$arch = if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "Arm64") { "arm64" } else { "amd64" }
+if ($IsLinux) { $os = "linux" }
+elseif ($IsMacOS) { $os = "darwin" }
+else { $os = "windows" }
+
+$cpuArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLower()
+switch ($cpuArch) {
+    "arm64" { $arch = "arm64" }
+    default { $arch = "amd64" }
+}
+
 $ext = if ($os -eq "windows") { ".exe" } else { "" }
 
 $assetName = "jacques-${Version}-${os}-${arch}${ext}"
@@ -33,8 +41,15 @@ $url = "https://github.com/$repo/releases/download/$Version/$assetName"
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 $dest = Join-Path $InstallDir "jacques$ext"
 
-Write-Host "Downloading $url"
-Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+Write-Host "Downloading $assetName"
+Write-Host "  from $url"
+
+try {
+    Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+} catch {
+    Write-Error "Download failed: $_`nCheck that a release asset exists for your platform ($os/$arch) at:`n  https://github.com/$repo/releases/tag/$Version"
+    return
+}
 
 if ($os -ne "windows") {
     chmod +x $dest
