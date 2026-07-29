@@ -1,0 +1,39 @@
+package kusto
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/jack-work/jacques/backend"
+	"github.com/jack-work/jacques/config"
+	"github.com/jack-work/jacques/data"
+	kustohttp "github.com/jack-work/jacques/kusto"
+)
+
+func init() {
+	backend.Register("kusto", New)
+}
+
+type Backend struct {
+	client *kustohttp.Client
+	name   string
+}
+
+func New(conn config.Connection) (backend.Backend, error) {
+	if conn.Token == "" {
+		return nil, fmt.Errorf("kusto connection %q: no bearer token was supplied to the backend; set scopes = \"<resource>/.default\" on this connection", conn.Name)
+	}
+	if conn.Cluster == "" {
+		return nil, fmt.Errorf("kusto connection %q: no cluster URL configured", conn.Name)
+	}
+	client := kustohttp.NewClient(conn.Cluster, conn.Database, conn.Token)
+	return &Backend{client: client, name: conn.Name}, nil
+}
+
+func (b *Backend) Name() string { return b.name }
+
+func (b *Backend) Query(ctx context.Context, query string) (data.RowStore, error) {
+	return b.client.QueryContext(ctx, query)
+}
+
+func (b *Backend) Close() error { return nil }

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>jacques</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div id="app">
+    <header id="toolbar">
+      <select id="conn-select"></select>
+      <textarea id="query-input" rows="3" placeholder="KQL / SQL query… (Ctrl+Enter to run)" spellcheck="false"></textarea>
+      <div class="toolbar-right">
+        <button id="run-btn">Run ⏎</button>
+        <button id="history-btn">History</button>
+      </div>
+      <span id="status"></span>
+    </header>
+
+    <div id="grid-area">
+      <div id="grid-container" tabindex="0">
+        <div id="grid-header"></div>
+        <div id="grid-scroll">
+          <div id="grid-spacer"></div>
+          <div id="grid-viewport"></div>
+        </div>
+      </div>
+      <div id="detail-panel">
+        <div id="detail-header">
+          <span id="detail-title"></span>
+          <button id="detail-close">&times;</button>
+        </div>
+        <pre id="detail-content"></pre>
+      </div>
+    </div>
+
+    <div id="search-bar">
+      <label>/</label>
+      <input id="search-input" type="text" placeholder="search… (\j = columns, \C = case-sensitive)">
+      <span id="search-info"></span>
+    </div>
+
+    <footer id="status-bar">
+      <span id="pos"></span>
+      <span id="search-status"></span>
+      <span id="bar-help">hjkl:move  space:detail  /:search  y:yank  Ctrl+Enter:run</span>
+    </footer>
+  </div>
+
+  <!-- query history modal -->
+  <div id="history-overlay">
+    <div id="history-box">
+      <h3>Query History</h3>
+      <input id="history-filter" type="text" placeholder="Filter queries…">
+      <ul id="history-list"></ul>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+env_time,level,message,service,count
+2026-04-28T10:00:00Z,Info,Application started,web-api,1
+2026-04-28T10:00:01Z,Info,Listening on port 8080,web-api,2
+2026-04-28T10:00:05Z,Warning,High memory usage detected,web-api,3
+2026-04-28T10:00:10Z,Error,Failed to connect to database,auth-svc,4
+2026-04-28T10:00:11Z,Info,Retrying connection attempt 1,auth-svc,5
+2026-04-28T10:00:12Z,Info,Retrying connection attempt 2,auth-svc,6
+2026-04-28T10:00:13Z,Info,Database connection established,auth-svc,7
+2026-04-28T10:00:15Z,Error,Request timeout after 30s,web-api,8
+2026-04-28T10:00:20Z,Info,Cache invalidated for user session,cache-svc,9
+2026-04-28T10:00:25Z,Warning,Disk usage above 80%,monitoring,10

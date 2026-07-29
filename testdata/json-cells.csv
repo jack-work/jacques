@@ -1,0 +1,4 @@
+name,level,details
+web-api,Info,"{""host"":""prod-01"",""port"":8080,""region"":""eastus""}"
+auth-svc,Error,"{""code"":""AUTH_FAILED"",""user"":""jack@contoso.com"",""attempts"":3,""lockout"":true}"
+cache-svc,Warning,"{""evictions"":142,""hit_rate"":0.87,""memory_mb"":512,""keys"":[""session:abc"",""token:def"",""user:ghi""]}"

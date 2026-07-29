@@ -1,0 +1,22 @@
+.env
+*.har
+*.exe
+*.exe~
+*.py
+stderr.log
+
+# Scratch queries and incident-specific data
+scratch.kql
+q*.kql
+tmp-*.kql
+tmp-*.md
+incident-queries/
+island301-*
+
+# never publish: local scratch, internal notes, binaries
+handoffs/
+plex-telemetry-docs.md
+*.kql
+*.exe
+*.exe~
+skills/
