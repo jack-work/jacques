@@ -251,6 +251,28 @@ jacques never derives a resource, splits scopes, or parses expiry itself.
 `client_id` is config metadata only: under `azure-cli-only` the Entra client is
 the Azure CLI public client. A connection with no `scopes` needs no token.
 
+**Which `msauth` is in this binary:**
+
+`msauth` is linked as a library, so a fix to the foundation reaches you only
+after jacques is rebuilt and reinstalled. `jacques version` reports the linked
+module version so an installed binary can be audited without disassembling it.
+It authenticates nothing and reads no cache:
+
+```
+$ jacques version
+jacques v0.2.0
+msauth  v0.3.1
+
+$ jacques version --json
+{
+  "jacques": "v0.2.0",
+  "msauth": "v0.3.1"
+}
+```
+
+A build that resolves `msauth` through a local `replace` directive reports
+`(devel)`, which correctly says the artifact is reproducible on one machine only.
+
 **Troubleshooting:**
 
 Acquisition failures print the stable `msauth` error code plus one line per

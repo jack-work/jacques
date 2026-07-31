@@ -45,7 +45,10 @@ var webFS embed.FS
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "version" {
-		fmt.Println("jacques", buildVersion)
+		if err := writeVersion(os.Stdout, os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "config" {
