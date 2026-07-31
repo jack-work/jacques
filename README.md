@@ -270,8 +270,17 @@ $ jacques version --json
 }
 ```
 
-A build that resolves `msauth` through a local `replace` directive reports
-`(devel)`, which correctly says the artifact is reproducible on one machine only.
+A build that resolves `msauth` through a local `replace` directive has no module
+version to report, so stamp the foundation commit at link time:
+
+```powershell
+go build -ldflags "-X github.com/jack-work/msauth.Stamp=$(git -C ../msauth rev-parse --short HEAD)"
+```
+
+such a build reports `replaced+<commit>`. Unstamped it reports
+`replaced=../msauth`, which names the directory and admits the artifact is
+reproducible on one machine only. A real module version always wins, so the
+stamp retires itself once `msauth` is published with tags.
 
 **Troubleshooting:**
 
