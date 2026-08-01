@@ -19,6 +19,7 @@ import (
 	"github.com/jack-work/jacques/config"
 	"github.com/jack-work/jacques/data"
 	"github.com/jack-work/jacques/render"
+	"github.com/jack-work/msauth"
 )
 
 type Server struct {
@@ -149,7 +150,13 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	token, err := auth.GetToken(ctx, resolved)
 	if err != nil {
-		detail := auth.FormatError(err)
+		detail := msauth.FormatError("token acquisition failed", err)
+		// The hint rides along on both surfaces: a browser user cannot see the
+		// server's stderr, and a broken broker environment is exactly the fault
+		// that re-running a login will not fix.
+		if hint := msauth.Hint(err); hint != "" {
+			detail += "\n" + hint
+		}
 		fmt.Fprintf(os.Stderr, "[jacques-web] auth error: %s\n", detail)
 		writeJSON(w, queryResult{Error: detail})
 		return

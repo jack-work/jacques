@@ -3,6 +3,9 @@ package auth
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -126,7 +129,7 @@ func TestEmptyAccessTokenIsRejectedWithStableCode(t *testing.T) {
 	if len(authErr.Attempts) != 1 || authErr.Attempts[0].Source != "azure-cli" {
 		t.Errorf("attempts = %+v, want one azure-cli attempt", authErr.Attempts)
 	}
-	if strings.Contains(FormatError(err), "no token available") {
+	if strings.Contains(msauth.FormatError("token acquisition failed", err), "no token available") {
 		t.Error("acquisition failure must not masquerade as the backend configuration message")
 	}
 }
@@ -197,7 +200,7 @@ func TestEmptyScopesNeedsNoToken(t *testing.T) {
 	}
 }
 
-func TestFormatErrorSurfacesCodeAndAttempts(t *testing.T) {
+func TestAcquisitionFailureRendersThroughTheFoundation(t *testing.T) {
 	stub := &stubAcquirer{err: &msauth.AuthError{
 		Code:    msauth.CodeAcquisitionFailed,
 		Message: "no configured credential source could satisfy the token request",
@@ -212,8 +215,8 @@ func TestFormatErrorSurfacesCodeAndAttempts(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an acquisition error")
 	}
-	rendered := FormatError(err)
-	for _, want := range []string{"acquisition_failed", "azure-cli", "azure_cli_failed", "az login"} {
+	rendered := msauth.FormatError("token acquisition failed", err)
+	for _, want := range []string{"token acquisition failed", "acquisition_failed", "azure-cli", "azure_cli_failed", "az login"} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("rendered error %q missing %q", rendered, want)
 		}
@@ -221,6 +224,236 @@ func TestFormatErrorSurfacesCodeAndAttempts(t *testing.T) {
 	if strings.Contains(rendered, "configure tenant_id") {
 		t.Error("acquisition failure must not be rendered as a configuration error")
 	}
+	// The actionable line is the whole reason jacques stopped rendering its
+	// own: a cold Azure CLI must be told to log in, not left to guess.
+	if hint := msauth.Hint(err); hint != "Run: az login" {
+		t.Errorf("hint = %q, want %q", hint, "Run: az login")
+	}
+}
+
+// TestBrokerFaultHintsAtDoctor pins the case the plain renderer cannot serve:
+// a signed-in user whose Az.Accounts is broken must be sent to msauth doctor,
+// not to a login that was never the problem.
+func TestBrokerFaultHintsAtDoctor(t *testing.T) {
+	err := &msauth.AuthError{
+		Code:     msauth.CodeAcquisitionFailed,
+		Message:  "no configured credential source could satisfy the token request",
+		Attempts: []msauth.Attempt{{Source: "wam", Code: msauth.CodeBrokerUnavailable, Message: "broker assembly not found"}},
+	}
+	if hint := msauth.Hint(err); hint != "Run: msauth doctor" {
+		t.Errorf("hint = %q, want %q", hint, "Run: msauth doctor")
+	}
+	if hint := msauth.Hint(errors.New("boom")); hint != "" {
+		t.Errorf("hint for a foreign error = %q, want empty", hint)
+	}
+}
+
+// TestNoLocalAuthErrorRenderer is the tripwire for the duplication this change
+// removed. jacques rendered *msauth.AuthError itself for as long as it had a
+// FormatError of its own; a one-line wrapper is how the copy would come back,
+// so the check is on the declaration and on the copied attempt layout rather
+// than on behavior.
+func TestNoLocalAuthErrorRenderer(t *testing.T) {
+	// Built at runtime so this test file does not match itself.
+	declaration := "func " + "FormatError("
+	hintDecl := "func " + "Hint("
+	attemptLayout := "\\n" + "  %s [%s]: %s"
+
+	root := ".."
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			switch info.Name() {
+			case ".git", "node_modules", "testdata", "scratch", "tmp":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		text := string(body)
+		for _, needle := range []string{declaration, hintDecl, attemptLayout} {
+			if strings.Contains(text, needle) {
+				t.Errorf("%s declares or re-implements the foundation's auth renderer (%q); call msauth.FormatError and msauth.Hint directly", path, needle)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+}
+
+// TestPolicyIsPinnedExplicitly guards the pin at the request, not the default.
+// jacques has no broker path; inheriting msauth's per-client default would let
+// a change there route a jacques acquisition through WAM without a code change
+// here, so the value must be set on every request jacques sends.
+func TestPolicyIsPinnedExplicitly(t *testing.T) {
+	stub := &stubAcquirer{result: validResult("stub-token")}
+	withStub(t, stub)
+
+	conn := config.Connection{Name: "telemetry", Scopes: "https://help.kusto.windows.net/.default"}
+	if _, err := GetToken(context.Background(), conn); err != nil {
+		t.Fatalf("GetToken: %v", err)
+	}
+	got := stub.calls[0].Policy
+	if got == "" {
+		t.Fatal("policy is empty: jacques must pin it rather than inherit msauth's default")
+	}
+	if got != msauth.PolicyAzureCLIOnly {
+		t.Fatalf("policy = %q, want %q", got, msauth.PolicyAzureCLIOnly)
+	}
+	for _, forbidden := range []msauth.Policy{msauth.PolicyWAMFirst, msauth.PolicyWAMOnly} {
+		if got == forbidden {
+			t.Fatalf("policy = %q: jacques has no broker path", got)
+		}
+	}
+}
+
+func TestNamespaceForConfigDir(t *testing.T) {
+	base := t.TempDir()
+	one := filepath.Join(base, "login-a")
+	two := filepath.Join(base, "login-b")
+
+	empty := namespaceForConfigDir("")
+	if empty != "" {
+		t.Fatalf("absent AZURE_CONFIG_DIR yielded %q, want the empty shared-default namespace", empty)
+	}
+	if got := namespaceForConfigDir("   "); got != "" {
+		t.Errorf("blank AZURE_CONFIG_DIR yielded %q, want empty", got)
+	}
+
+	canonical := namespaceForConfigDir(one)
+	if canonical == "" {
+		t.Fatal("a present AZURE_CONFIG_DIR must not yield the shared-default namespace")
+	}
+	if len(canonical) > 64 {
+		t.Errorf("namespace is %d bytes: %q", len(canonical), canonical)
+	}
+	for _, r := range canonical {
+		if r < 0x20 || r == 0x7f {
+			t.Fatalf("namespace %q contains a control character; msauth rejects those", canonical)
+		}
+	}
+
+	// Spellings of ONE directory that must collapse to ONE namespace. Each of
+	// these fooled a naive os.Getenv passthrough.
+	spellings := []struct {
+		name  string
+		value string
+	}{
+		{name: "identical", value: one},
+		{name: "trailing separator", value: one + string(filepath.Separator)},
+		{name: "surrounding whitespace", value: "  " + one + "  "},
+		{name: "dot segment", value: filepath.Join(one, ".")},
+		{name: "parent then back", value: filepath.Join(one, "nested", "..")},
+		{name: "forward slashes", value: filepath.ToSlash(one)},
+	}
+	if runtime.GOOS == "windows" {
+		spellings = append(spellings,
+			struct {
+				name  string
+				value string
+			}{name: "upper case", value: strings.ToUpper(one)},
+			struct {
+				name  string
+				value string
+			}{name: "backslashes", value: strings.ReplaceAll(filepath.ToSlash(one), "/", "\\")},
+		)
+	}
+	for _, tc := range spellings {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := namespaceForConfigDir(tc.value); got != canonical {
+				t.Errorf("namespace(%q) = %q, want %q -- one directory must be one namespace", tc.value, got, canonical)
+			}
+		})
+	}
+
+	// Two directories must never collide, or one login's token is served to
+	// the other inside the validity window.
+	if other := namespaceForConfigDir(two); other == canonical {
+		t.Fatalf("distinct directories %q and %q share namespace %q", one, two, canonical)
+	}
+	if other := namespaceForConfigDir(two); other == "" {
+		t.Fatal("a second directory collapsed to the shared-default namespace")
+	}
+	// A sibling whose name is a prefix of another must not collide either.
+	if got := namespaceForConfigDir(one + "-extra"); got == canonical {
+		t.Errorf("prefix sibling %q shares namespace with %q", one+"-extra", one)
+	}
+}
+
+// TestCacheNamespaceReachesMsauth proves the derivation is not merely correct
+// in isolation: the value must actually land in the TokenRequest, and it must
+// be read at request time so a .env loaded into the process is honored.
+func TestCacheNamespaceReachesMsauth(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("absent stays on the shared default", func(t *testing.T) {
+		t.Setenv("AZURE_CONFIG_DIR", "")
+		stub := &stubAcquirer{result: validResult("stub-token")}
+		withStub(t, stub)
+		if _, err := GetToken(context.Background(), config.Connection{Name: "c", Scopes: "https://help.kusto.windows.net/.default"}); err != nil {
+			t.Fatalf("GetToken: %v", err)
+		}
+		if got := stub.calls[0].CacheNamespace; got != "" {
+			t.Fatalf("CacheNamespace = %q, want empty so warm cache entries are not orphaned", got)
+		}
+	})
+
+	t.Run("pinned login gets its own namespace", func(t *testing.T) {
+		t.Setenv("AZURE_CONFIG_DIR", dir)
+		stub := &stubAcquirer{result: validResult("stub-token")}
+		withStub(t, stub)
+		if _, err := GetToken(context.Background(), config.Connection{Name: "c", Scopes: "https://help.kusto.windows.net/.default"}); err != nil {
+			t.Fatalf("GetToken: %v", err)
+		}
+		if got, want := stub.calls[0].CacheNamespace, namespaceForConfigDir(dir); got != want {
+			t.Fatalf("CacheNamespace = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("two connections under one login share it", func(t *testing.T) {
+		t.Setenv("AZURE_CONFIG_DIR", dir)
+		stub := &stubAcquirer{result: validResult("stub-token")}
+		withStub(t, stub)
+		for _, name := range []string{"telemetry", "incidents"} {
+			if _, err := GetToken(context.Background(), config.Connection{Name: name, Scopes: "https://help.kusto.windows.net/.default"}); err != nil {
+				t.Fatalf("GetToken(%s): %v", name, err)
+			}
+		}
+		if len(stub.calls) != 2 {
+			t.Fatalf("acquire calls = %d, want 2", len(stub.calls))
+		}
+		if stub.calls[0].CacheNamespace != stub.calls[1].CacheNamespace {
+			t.Fatalf("namespaces %q and %q differ; the namespace follows the login, not the connection",
+				stub.calls[0].CacheNamespace, stub.calls[1].CacheNamespace)
+		}
+	})
+
+	t.Run("one connection under two logins does not", func(t *testing.T) {
+		conn := config.Connection{Name: "telemetry", Scopes: "https://help.kusto.windows.net/.default"}
+		seen := make([]string, 0, 2)
+		for _, configDir := range []string{dir, t.TempDir()} {
+			t.Setenv("AZURE_CONFIG_DIR", configDir)
+			stub := &stubAcquirer{result: validResult("stub-token")}
+			withStub(t, stub)
+			if _, err := GetToken(context.Background(), conn); err != nil {
+				t.Fatalf("GetToken: %v", err)
+			}
+			seen = append(seen, stub.calls[0].CacheNamespace)
+		}
+		if seen[0] == seen[1] {
+			t.Fatalf("one connection under two logins shared namespace %q", seen[0])
+		}
+	})
 }
 
 func TestNonAuthErrorGetsStableInternalCode(t *testing.T) {

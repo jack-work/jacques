@@ -15,9 +15,13 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/jack-work/jacques/config"
@@ -46,7 +50,8 @@ var newAcquirer = func(conn config.Connection) (acquirer, error) {
 // GetToken returns a bearer token for the connection.
 //
 // Errors are *msauth.AuthError values carrying a stable code and sanitized
-// per-source attempts. Use FormatError to render them.
+// per-source attempts. Render them with msauth.FormatError and msauth.Hint;
+// jacques keeps no renderer of its own.
 func GetToken(ctx context.Context, conn config.Connection) (string, error) {
 	if conn.Token != "" {
 		return conn.Token, nil
@@ -65,13 +70,18 @@ func GetToken(ctx context.Context, conn config.Connection) (string, error) {
 	}
 
 	request := selectorFor(conn.Scopes)
+	// Pinned explicitly, not inherited. jacques has no broker path at all, so a
+	// day when msauth's per-client default moves must not silently route a
+	// jacques acquisition through WAM.
 	request.Policy = msauth.PolicyAzureCLIOnly
+	request.CacheNamespace = cacheNamespace()
 
 	fmt.Fprintf(os.Stderr, "\x1b[38;5;241m○ acquiring token via msauth (azure-cli-only)\x1b[0m\n")
 	logging.Info(ctx, "acquiring token via msauth",
 		logging.String("connection", conn.Name),
 		logging.String("selector", conn.Scopes),
 		logging.String("policy", string(msauth.PolicyAzureCLIOnly)),
+		logging.String("cache_namespace", request.CacheNamespace),
 		logging.String("config_tenant_id", conn.TenantID),
 		logging.String("config_client_id", conn.ClientID),
 	)
@@ -103,6 +113,51 @@ func GetToken(ctx context.Context, conn config.Connection) (string, error) {
 		logging.String("expires_at", result.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z")),
 	)
 	return result.AccessToken, nil
+}
+
+// cacheNamespace derives msauth's identity discriminator from the effective
+// AZURE_CONFIG_DIR, read at request time so it reflects any value a working
+// directory's .env has already loaded.
+//
+// msauth keys its cache by client, tenant, and scope, which cannot tell two
+// signed-in Azure CLI identities apart. jacques can pin a different Azure CLI
+// login per working directory through AZURE_CONFIG_DIR, so it must supply the
+// discriminator itself or one directory's token can be served to another
+// inside the validity window.
+//
+// The namespace follows the login, not the connection: two connections under
+// one login share a cache entry, and one connection under two logins does not.
+func cacheNamespace() string {
+	return namespaceForConfigDir(os.Getenv("AZURE_CONFIG_DIR"))
+}
+
+// namespaceForConfigDir normalizes one AZURE_CONFIG_DIR value into a stable,
+// bounded namespace.
+//
+// An absent or blank value yields the EMPTY namespace deliberately: that is
+// msauth's shared default, and any other choice would orphan every warm cache
+// entry already on the machine.
+//
+// A present value is made absolute, cleaned, and case-folded on Windows so two
+// spellings of one directory collapse to one namespace, then hashed with
+// SHA-256 and truncated. Hashing keeps the result well inside msauth's length
+// limit, free of control characters, and independent of how long or how deeply
+// nested the directory is; the namespace is an opaque discriminator, never a
+// path the user reads back.
+func namespaceForConfigDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	dir = filepath.Clean(dir)
+	if runtime.GOOS == "windows" {
+		dir = strings.ToLower(dir)
+	}
+	sum := sha256.Sum256([]byte(dir))
+	return "azure-config-dir-" + hex.EncodeToString(sum[:])[:32]
 }
 
 // selectorFor turns the configured scopes value into exactly one msauth
@@ -140,23 +195,4 @@ func wrapNonAuthError(conn config.Connection, err error) error {
 		Code:    msauth.CodeInternal,
 		Message: fmt.Sprintf("connection %q: %v", conn.Name, err),
 	}
-}
-
-// FormatError renders an acquisition failure with its stable msauth code and
-// sanitized per-source attempts, so a token failure is never mistaken for a
-// configuration problem.
-func FormatError(err error) string {
-	if err == nil {
-		return ""
-	}
-	var authErr *msauth.AuthError
-	if !errors.As(err, &authErr) {
-		return err.Error()
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "token acquisition failed [%s]: %s", authErr.Code, authErr.Message)
-	for _, attempt := range authErr.Attempts {
-		fmt.Fprintf(&b, "\n  %s [%s]: %s", attempt.Source, attempt.Code, attempt.Message)
-	}
-	return b.String()
 }

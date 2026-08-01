@@ -25,6 +25,7 @@ import (
 	"github.com/jack-work/jacques/logging"
 	"github.com/jack-work/jacques/render"
 	"github.com/jack-work/jacques/server"
+	"github.com/jack-work/msauth"
 )
 
 const (
@@ -191,7 +192,10 @@ func main() {
 
 		token, err := auth.GetToken(ctx, resolved)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %s\n", auth.FormatError(err))
+			fmt.Fprintf(os.Stderr, "error: %s\n", msauth.FormatError("token acquisition failed", err))
+			if hint := msauth.Hint(err); hint != "" {
+				fmt.Fprintln(os.Stderr, hint)
+			}
 			os.Exit(1)
 		}
 		resolved.Token = token
