@@ -271,16 +271,48 @@ $ jacques version --json
 ```
 
 A build that resolves `msauth` through a local `replace` directive has no module
-version to report, so stamp the foundation commit at link time:
+version to report, so stamp the foundation commit at link time. **Stamp the
+dirty state too:**
 
-```powershell
-go build -ldflags "-X github.com/jack-work/msauth.Stamp=$(git -C ../msauth rev-parse --short HEAD)"
+```bash
+STAMP=$(git -C ../msauth rev-parse --short HEAD)
+[ -z "$(git -C ../msauth status --porcelain)" ] || STAMP="$STAMP+dirty"
+go build -ldflags "-X github.com/jack-work/msauth.Stamp=$STAMP"
 ```
 
-such a build reports `replaced+<commit>`. Unstamped it reports
+Such a build reports `replaced+<commit>`. Unstamped it reports
 `replaced=../msauth`, which names the directory and admits the artifact is
 reproducible on one machine only. A real module version always wins, so the
 stamp retires itself once `msauth` is published with tags.
+
+Write it as two statements. The tidier one-liner
+`STAMP=$(...)$(git status --porcelain | grep -q . && echo +dirty)` **exits 1 on a
+clean tree**, because the assignment takes the status of its last substitution
+and `grep -q` found nothing, so under `set -e` it aborts the build on exactly the
+healthy case.
+
+Do not shorten this to `rev-parse --short HEAD` alone. `rev-parse` reports HEAD
+whatever the worktree contains, so a jacques built against a *modified* `msauth`
+would be stamped with a clean revision whose content it does not carry, and
+every freshness check that reads the stamp would pass on it. That is strictly
+worse than a stale artifact, because a stale one is detectable.
+
+**Is the installed binary current:**
+
+`.msauth-floor` names the `msauth` revision this source requires, and
+`TestInstalledArtifactCarriesRequiredFoundation` judges the installed binary
+against it, so `go test .` fails when the jacques a user actually runs carries an
+older auth foundation than the source was written against. It reads the
+artifact's build metadata and never executes it. The judgement itself lives in
+`msauth`, so every client answers this question the same way:
+
+```bash
+go test -run TestInstalledArtifactCarriesRequiredFoundation .
+msauth audit --gate . "$(command -v jacques)"   # the same verdict, from the same floor
+```
+
+An absent artifact skips; a stale one fails and prints the rebuild recipe.
+`JACQUES_INSTALLED_ARTIFACT` overrides which binary is judged.
 
 **Troubleshooting:**
 

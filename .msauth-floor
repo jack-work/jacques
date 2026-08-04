@@ -11,4 +11,4 @@
 #
 # Raise it when this repository starts depending on newer foundation behaviour,
 # and rebuild + reinstall in the same change.
-29679c9
+bffb52b
