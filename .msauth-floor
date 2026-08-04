@@ -1,5 +1,16 @@
 # The github.com/jack-work/msauth revision this repository's source requires.
 #
+# THIS IS THE COMPILE FLOOR: the OLDEST foundation revision this source can be
+# built against. It moves when jacques starts depending on new foundation API,
+# and not otherwise. 29679c9 is the revision that first carried msauth.LoadGate,
+# which foundation_gate_test.go calls.
+#
+# It is deliberately NOT "the revision we last verified". That reading turns
+# every client's suite red on every foundation commit until someone rebuilds,
+# and a permanently red gate is one people learn to ignore. The fleet-wide
+# "which artifacts does this commit oblige me to rebuild" question has its own
+# instrument: msauth audit --fleet --required <rev>.
+#
 # jacques links the shared auth foundation as a Go LIBRARY, so a fix made in
 # msauth reaches a user only when jacques is rebuilt and reinstalled. Nothing
 # used to notice the gap: an installed jacques.exe could match jacques HEAD
@@ -9,6 +20,7 @@
 # installed binary against it. An artifact carrying this revision or any later
 # one passes; anything older is a rebuild.
 #
-# Raise it when this repository starts depending on newer foundation behaviour,
-# and rebuild + reinstall in the same change.
-bffb52b
+# The consequence worth stating plainly: a foundation SECURITY fix does not turn
+# this gate red, because the compile floor did not move. The fleet sweep catches
+# that; this gate is not the instrument for it.
+29679c9
