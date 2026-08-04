@@ -1,0 +1,14 @@
+# The github.com/jack-work/msauth revision this repository's source requires.
+#
+# jacques links the shared auth foundation as a Go LIBRARY, so a fix made in
+# msauth reaches a user only when jacques is rebuilt and reinstalled. Nothing
+# used to notice the gap: an installed jacques.exe could match jacques HEAD
+# exactly and still carry auth code many foundation commits old.
+#
+# TestInstalledArtifactCarriesRequiredFoundation reads this floor and judges the
+# installed binary against it. An artifact carrying this revision or any later
+# one passes; anything older is a rebuild.
+#
+# Raise it when this repository starts depending on newer foundation behaviour,
+# and rebuild + reinstall in the same change.
+29679c9
