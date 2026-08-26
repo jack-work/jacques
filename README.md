@@ -30,6 +30,24 @@ To install a specific version:
 go install github.com/jack-work/jacques@latest
 ```
 
+**Nix** (x86_64/aarch64, linux and darwin):
+
+```bash
+nix build github:jack-work/jacques --override-input msauth path:/abs/path/to/msauth
+```
+
+The override is not optional. `go.mod` carries
+`replace github.com/jack-work/msauth => ../msauth` and that repository is not
+public, so the flake declares the input as an empty placeholder rather than
+committing a path out of somebody's home directory; `nix/package.nix` builds a
+store workspace holding both repos as siblings. From a consuming flake, use
+`inputs.jacques.inputs.msauth.follows = "<your msauth source input>"`.
+
+The derivation sets `allowGoReference = true` on purpose. `-trimpath` makes Go
+drop the `-ldflags` build setting, which is the only place the foundation stamp
+below can be read from -- so a trimmed build is permanently `VerdictUnstamped`.
+See the comment on that line for the measurement.
+
 ### 2. Prerequisites
 
 **Azure CLI** -- jacques acquires Kusto tokens through the shared `msauth`
