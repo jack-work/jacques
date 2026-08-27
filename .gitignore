@@ -20,3 +20,9 @@ plex-telemetry-docs.md
 *.exe
 *.exe~
 skills/
+
+# jacques writes its own OTel log to ./jacques/jacques.log, relative to the
+# working directory -- so running jacques FROM THIS REPO leaves an untracked
+# jacques/ here. The file carries query text, tenant and client ids. Root-anchored
+# so it can only ever match that stray directory, never a real path deeper in.
+/jacques/
