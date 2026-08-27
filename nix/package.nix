@@ -89,7 +89,11 @@ else
     # $NIX_BUILD_TOP/<name-without-hash>. Hence the name has to be repeated here.
     sourceRoot = "jacques-workspace-${version}/jacques";
 
-    vendorHash = "sha256-c6DBQOJy3S3ZTKs4vdyUgrZtzEOizCSZ5yuY83O8bu8=";
+    # Reset from the "got:" value nix prints when this moves. It moved when the
+    # msauth branch landed: the vendor derivation is built from the WORKSPACE,
+    # which holds both repos, so a change on either side of the `replace` can
+    # shift it even when go.mod and go.sum are untouched.
+    vendorHash = "sha256-dU85zKfT9IgE5bkZftqDxCDhHqfQFZEq9XPn+bpVotY=";
 
     # -trimpath IS TURNED OFF HERE, AND THAT IS THE WHOLE POINT.
     #
