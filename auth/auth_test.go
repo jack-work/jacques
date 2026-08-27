@@ -83,8 +83,8 @@ func TestSelectorReachesMsauthUnmodified(t *testing.T) {
 			if (got.Scope == "") == (got.Audience == "") {
 				t.Errorf("exactly one of scope or audience must be set, got scope=%q audience=%q", got.Scope, got.Audience)
 			}
-			if got.Policy != msauth.PolicyAzureCLIOnly {
-				t.Errorf("policy = %q, want %q", got.Policy, msauth.PolicyAzureCLIOnly)
+			if got.Policy != msauth.PolicyWAMFirst {
+				t.Errorf("policy = %q, want %q", got.Policy, msauth.PolicyWAMFirst)
 			}
 			if got.ForceRefresh {
 				t.Error("ForceRefresh must stay false; msauth owns refresh skew")
@@ -292,9 +292,16 @@ func TestNoLocalAuthErrorRenderer(t *testing.T) {
 }
 
 // TestPolicyIsPinnedExplicitly guards the pin at the request, not the default.
-// jacques has no broker path; inheriting msauth's per-client default would let
-// a change there route a jacques acquisition through WAM without a code change
-// here, so the value must be set on every request jacques sends.
+// Inheriting msauth's per-client default would let a change there alter which
+// credential a query runs under without a code change here, so the value must
+// be set on every request jacques sends.
+//
+// The pinned value is now PolicyWAMFirst. It was azure-cli-only on the grounds
+// that jacques had no broker path, which stopped being true when msauth learned
+// to reach the Windows broker from inside WSL. On a WSL box that bridge is the
+// ONLY workable path -- the account's passkey is a platform authenticator Linux
+// cannot drive, and there is no USB for a security key -- while a machine with a
+// warm `az login` and no broker still falls through to the Azure CLI unchanged.
 func TestPolicyIsPinnedExplicitly(t *testing.T) {
 	stub := &stubAcquirer{result: validResult("stub-token")}
 	withStub(t, stub)
@@ -307,13 +314,13 @@ func TestPolicyIsPinnedExplicitly(t *testing.T) {
 	if got == "" {
 		t.Fatal("policy is empty: jacques must pin it rather than inherit msauth's default")
 	}
-	if got != msauth.PolicyAzureCLIOnly {
-		t.Fatalf("policy = %q, want %q", got, msauth.PolicyAzureCLIOnly)
+	if got != msauth.PolicyWAMFirst {
+		t.Fatalf("policy = %q, want %q", got, msauth.PolicyWAMFirst)
 	}
-	for _, forbidden := range []msauth.Policy{msauth.PolicyWAMFirst, msauth.PolicyWAMOnly} {
-		if got == forbidden {
-			t.Fatalf("policy = %q: jacques has no broker path", got)
-		}
+	// WAMOnly stays forbidden: it would remove the Azure CLI fallback and break
+	// every machine that has a working `az login` and no broker at all.
+	if got == msauth.PolicyWAMOnly {
+		t.Fatal("policy = wam-only: that discards the Azure CLI fallback")
 	}
 }
 

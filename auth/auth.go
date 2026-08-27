@@ -1,7 +1,10 @@
 // Package auth adapts jacques connections to the shared msauth foundation.
 //
-// jacques has no broker (WAM) path: Azure Data Explorer works from the current
-// Azure CLI identity, so every request uses msauth's azure-cli-only policy.
+// jacques prefers the platform broker and falls back to the Azure CLI: ADX works
+// from the current
+// Azure CLI identity, and inside WSL from the Windows broker msauth bridges to,
+// so every request uses msauth's wam-first policy: broker where one exists,
+// Azure CLI everywhere else.
 // msauth owns acquisition, caching, refresh skew, sanitized diagnostics, and
 // stable error codes; jacques owns only connection semantics.
 //
@@ -70,17 +73,28 @@ func GetToken(ctx context.Context, conn config.Connection) (string, error) {
 	}
 
 	request := selectorFor(conn.Scopes)
-	// Pinned explicitly, not inherited. jacques has no broker path at all, so a
-	// day when msauth's per-client default moves must not silently route a
-	// jacques acquisition through WAM.
-	request.Policy = msauth.PolicyAzureCLIOnly
+	// Pinned explicitly, not inherited, so a day when msauth's per-client
+	// default moves cannot silently change which credential a query runs under.
+	//
+	// This was PolicyAzureCLIOnly, on the grounds that "jacques has no broker
+	// path at all". That is no longer true. msauth now treats a broker as a
+	// PLATFORM facility: WAM on Windows, and inside WSL the Windows host's
+	// broker reached over interop. On this box that is the only path that
+	// works at all -- the account's passkey is Windows Hello, a platform
+	// authenticator Linux cannot drive, and a WSL VM has no USB for a security
+	// key, so an azure-cli-only jacques is unauthenticatable by construction.
+	//
+	// WAMFirst rather than WAMOnly: the broker is preferred where it exists,
+	// and a machine with a warm `az login` and no broker keeps working exactly
+	// as before. Both orderings are honest here; only this one degrades.
+	request.Policy = msauth.PolicyWAMFirst
 	request.CacheNamespace = cacheNamespace()
 
-	fmt.Fprintf(os.Stderr, "\x1b[38;5;241m○ acquiring token via msauth (azure-cli-only)\x1b[0m\n")
+	fmt.Fprintf(os.Stderr, "\x1b[38;5;241m○ acquiring token via msauth (wam-first)\x1b[0m\n")
 	logging.Info(ctx, "acquiring token via msauth",
 		logging.String("connection", conn.Name),
 		logging.String("selector", conn.Scopes),
-		logging.String("policy", string(msauth.PolicyAzureCLIOnly)),
+		logging.String("policy", string(msauth.PolicyWAMFirst)),
 		logging.String("cache_namespace", request.CacheNamespace),
 		logging.String("config_tenant_id", conn.TenantID),
 		logging.String("config_client_id", conn.ClientID),
