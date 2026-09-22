@@ -93,7 +93,7 @@ else
     # msauth branch landed: the vendor derivation is built from the WORKSPACE,
     # which holds both repos, so a change on either side of the `replace` can
     # shift it even when go.mod and go.sum are untouched.
-    vendorHash = "sha256-dU85zKfT9IgE5bkZftqDxCDhHqfQFZEq9XPn+bpVotY=";
+    vendorHash = "sha256-LdD4tAdIQKyzEDC1vPkvTW+ZKr8o8mHMzaxWOU7MVLU=";
 
     # -trimpath IS TURNED OFF HERE, AND THAT IS THE WHOLE POINT.
     #
