@@ -1,27 +1,17 @@
 # jacques, packaged for nix.
 #
 # ---------------------------------------------------------------------------
-# THE ONE THING TO KNOW: THE msauth INPUT
+# ONE INPUT, SINCE 2026-09-30
 # ---------------------------------------------------------------------------
-# jacques links github.com/jack-work/msauth through a local `replace` in go.mod,
-# and that repository is not public (github.com/jack-work/msauth returns 404).
-# There is therefore no honest default URL for it, and this repository is public,
-# so a path into somebody's home directory must not be committed here.
+# github.com/jack-work/msauth is public and tagged, so jacques requires it like
+# any other module and this flake needs nothing but nixpkgs:
 #
-# The input below is a deliberate PLACEHOLDER -- an empty directory that exists
-# on every unix box, so the lock file resolves and nothing about the author's
-# machine is published. Building requires overriding it:
+#     nix build github:jack-work/jacques
 #
-#     nix build github:jack-work/jacques --override-input msauth path:/abs/path/to/msauth
-#
-# or, from a consuming flake:
-#
-#     inputs.jacques.url = "github:jack-work/jacques";
-#     inputs.jacques.inputs.msauth.follows = "msauth";   # your own source input
-#
-# Forget it and you get nix/package.nix's error, which names the remedy. This is
-# not a nix quirk: a plain `go build` in a checkout without the sibling fails the
-# same way, for the same reason.
+# It used to need a second input. msauth was consumed through a local `replace`
+# and the repository was private, so there was no honest default URL for it and
+# this flake declared an empty placeholder the consumer had to override. Forget
+# the override and the build failed in nix/package.nix. That is all gone.
 #
 # ---------------------------------------------------------------------------
 # PLATFORMS
@@ -36,15 +26,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    # See the header. Override this; do not build against it.
-    msauth = {
-      url = "path:/var/empty";
-      flake = false;
-    };
   };
 
   outputs =
-    { self, nixpkgs, msauth }:
+    { self, nixpkgs }:
     let
       supportedSystems = [
         "x86_64-linux"
@@ -70,25 +55,12 @@
           "git-${builtins.substring 0 7 self.dirtyRev}+dirty"
         else
           "unknown";
-
-      # The link-time foundation stamp, i.e. README.md's shell recipe expressed
-      # against the locked input rather than against whatever `git -C ../msauth`
-      # happens to say at build time. Nix's dirtyShortRev is "<7hex>-dirty";
-      # msauth's convention is "<7hex>+dirty".
-      msauthStamp =
-        if msauth ? shortRev then
-          msauth.shortRev
-        else if msauth ? dirtyShortRev then
-          "${builtins.substring 0 7 msauth.dirtyShortRev}+dirty"
-        else
-          "";
     in
     {
       overlays.default = final: prev: {
         jacques = final.callPackage ./nix/package.nix {
-          msauthSrc = msauth;
           jacquesSrc = self;
-          inherit version msauthStamp;
+          inherit version;
         };
       };
 
@@ -96,9 +68,8 @@
         { pkgs }:
         rec {
           jacques = pkgs.callPackage ./nix/package.nix {
-            msauthSrc = msauth;
             jacquesSrc = self;
-            inherit version msauthStamp;
+            inherit version;
           };
           default = jacques;
         }
@@ -107,9 +78,7 @@
       devShells = forAllSystems (
         { pkgs }:
         {
-          # `nix develop` gives the toolchain, not the package -- entering a
-          # shell must not depend on the msauth override being present, since
-          # fixing that layout is one of the things you enter a shell to do.
+          # `nix develop` gives the toolchain, not the package.
           #
           # azure-cli is here because it is not optional at RUN time: msauth's
           # non-windows build has no broker and no device-code path on this
@@ -124,7 +93,7 @@
               azure-cli
             ];
             shellHook = ''
-              echo "[jacques] go $(go version | cut -d' ' -f3); msauth expected at ../msauth" >&2
+              echo "[jacques] go $(go version | cut -d' ' -f3)" >&2
             '';
           };
         }

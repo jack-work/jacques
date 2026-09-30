@@ -7,7 +7,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/duckdb/duckdb-go/v2 v2.10502.0
 	github.com/hashicorp/hcl/v2 v2.24.0
-	github.com/jack-work/msauth v0.0.0-00010101000000-000000000000
+	github.com/jack-work/msauth v0.2.0
 	github.com/neovim/go-client v1.2.1
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/stdout/stdoutlog v0.19.0
@@ -69,5 +69,3 @@ require (
 	golang.org/x/tools v0.41.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 )
-
-replace github.com/jack-work/msauth => ../msauth

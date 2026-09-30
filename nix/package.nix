@@ -1,40 +1,29 @@
 # The jacques derivation.
 #
-# ---------------------------------------------------------------------------
-# WHY THIS IS NOT A ONE-LINE buildGoModule
-# ---------------------------------------------------------------------------
-# jacques's go.mod ends with
+# An ordinary buildGoModule since 2026-09-30, and the comment that used to live
+# here is worth keeping as history: jacques consumed the shared auth foundation
+# through `replace github.com/jack-work/msauth => ../msauth`, so the module
+# graph did not close unless msauth sat NEXT TO this repository on disk. No
+# vendorHash could rescue that -- a filesystem replace is a path, not a module
+# to fetch -- so this file assembled a two-repo WORKSPACE in the store and
+# pointed sourceRoot at the jacques half, and flake.nix declared an empty
+# placeholder input the consumer was obliged to override.
 #
-#     replace github.com/jack-work/msauth => ../msauth
+# github.com/jack-work/msauth is public and tagged now, so all of that is gone,
+# and so are two hazards that came with it:
 #
-# so the module graph does not close unless the shared auth foundation sits
-# NEXT TO this repository on disk. A derivation whose src is jacques alone
-# fails in `go mod download` with a missing replacement directory, and no
-# vendorHash can rescue it: the replacement is a filesystem path, not a module
-# to fetch.
-#
-# So the source we hand to buildGoModule is not this repository. It is a
-# WORKSPACE built here: a directory holding `jacques/` and `msauth/` as
-# siblings, with sourceRoot pointing at the jacques half. That reproduces the
-# layout the go.mod already requires, inside the store, hermetically.
-#
-# `msauthSrc` is supplied by the caller precisely because it cannot be named
-# here. github.com/jack-work/msauth does not exist publicly (verified: the API
-# returns 404), and this repository IS public, so an absolute path to somebody's
-# checkout committed here would publish an account name -- the same reason
-# foundation_gate_test.go resolves the installed artifact at run time instead of
-# hardcoding it. flake.nix therefore declares the input as an empty placeholder
-# and the consumer overrides it; see the error below, which is what you get if
-# you forget.
+#   * the vendorHash moved whenever msauth moved, with go.mod and go.sum
+#     untouched, because `go mod vendor` copies the replace target into
+#     vendor/. On 2026-09-30 that failed a system build deep inside a
+#     derivation whose name never mentions msauth.
+#   * the link-time `msauth.Stamp` ldflag existed only because a filesystem
+#     replace carries no module version. A module-linked artifact records its
+#     foundation version in build info; msauth's own auditor calls that "the
+#     case the stamp exists to work around".
 {
   lib,
   buildGoModule,
-  runCommand,
   stdenv,
-
-  # Source of github.com/jack-work/msauth, laid out as it is in its own repo
-  # (go.mod at the root). Required.
-  msauthSrc,
 
   # Source of this repository.
   jacquesSrc,
@@ -42,61 +31,20 @@
   # What `jacques version` reports. See flake.nix for how it is derived.
   version ? "unknown",
 
-  # Short revision of msauthSrc, "+dirty" appended when that worktree carried
-  # uncommitted changes. Empty means "do not stamp", and an unstamped build
-  # honestly reports `replaced=../msauth` instead of a commit it may not carry.
-  msauthStamp ? "",
-
   # Kept off by default: see doCheck below.
   runTests ? false,
 }:
 
-let
-  msauthPresent = builtins.pathExists "${msauthSrc}/go.mod";
-
-  workspace = runCommand "jacques-workspace-${version}" { } ''
-    mkdir -p $out
-    cp -r ${jacquesSrc} $out/jacques
-    cp -r ${msauthSrc} $out/msauth
-    chmod -R u+w $out
-  '';
-in
-
-if !msauthPresent then
-  throw ''
-    jacques cannot be built without the msauth foundation source.
-
-    Its go.mod carries `replace github.com/jack-work/msauth => ../msauth`, so the
-    build needs that repository as a sibling checkout. Point the `msauth` input at
-    it:
-
-        nix build github:jack-work/jacques --override-input msauth path:/abs/path/to/msauth
-
-    or, from a flake that already has it as an input:
-
-        inputs.jacques.inputs.msauth.follows = "my-msauth-source";
-
-    (got a source with no go.mod at its root: ${msauthSrc})
-  ''
-else
-
-  buildGoModule {
+buildGoModule {
     pname = "jacques";
     inherit version;
 
-    src = workspace;
-    # `workspace` is a store DIRECTORY, so the generic unpackPhase copies it to
-    # $NIX_BUILD_TOP/<name-without-hash>. Hence the name has to be repeated here.
-    sourceRoot = "jacques-workspace-${version}/jacques";
+    src = jacquesSrc;
 
-    # Reset from the "got:" value nix prints when this moves. It moved when the
-    # msauth branch landed: the vendor derivation is built from the WORKSPACE,
-    # which holds both repos, so a change on either side of the `replace` can
-    # shift it even when go.mod and go.sum are untouched.
-    #
-    # Moved again 2026-09-30 for msauth a3592bb (the wslinfo PATH fallback),
-    # which confirms the paragraph above: msauth source only, go.sum untouched.
-    vendorHash = "sha256-UtDMKUTF4TYjmChcLBCTGkJKePDO54+6Zf7Rt0jS4s0=";
+    # Covers go.mod and go.sum only, now that no local source is vendored in,
+    # so it moves when jacques's dependencies move and not otherwise. It used
+    # to move whenever msauth did; see the header.
+    vendorHash = "sha256-XATka6kWA9yfKYdc8s4k+4j45XUJzK14vJL21fKW92E=";
 
     # -trimpath IS TURNED OFF HERE, AND THAT IS THE WHOLE POINT.
     #
@@ -107,12 +55,11 @@ else
     #   go build          -ldflags "-X main.Stamp=abc1234"  ->  build -ldflags="-X main.Stamp=abc1234"
     #   go build -trimpath -ldflags "-X main.Stamp=abc1234" ->  build -trimpath=true          (no ldflags)
     #
-    # msauth reads the foundation stamp out of exactly that build setting, and
-    # only that one (see stampFromBuildInfo: it deliberately reads the artifact
-    # without executing it). So a -trimpath build of jacques is
-    # VerdictUnstamped -- "the artifact cannot say which foundation code it
-    # contains" -- forever. Not stale: UNAUDITABLE, which the foundation treats
-    # as worse. Verified on a real build before this line existed.
+    # The stamp itself is gone now that msauth is a versioned module, but the
+    # setting is still load-bearing: msauth's auditor reads an artifact's
+    # provenance out of build info precisely so it can judge a binary WITHOUT
+    # executing it, and -trimpath is the switch that makes a binary opaque to
+    # it. Leave this on. Verified on a real build before this line existed.
     #
     # The cost is honest and was measured too: the untrimmed binary keeps the
     # toolchain's source paths in its pclntab, so nix retains a runtime
@@ -139,16 +86,6 @@ else
       "-w"
       "-X"
       "main.buildVersion=${version}"
-    ]
-    ++ lib.optionals (msauthStamp != "") [
-      # The foundation is linked as a Go LIBRARY through a local `replace`, so it
-      # has no module version for `jacques version` to report and an installed
-      # binary can silently carry months-old auth code. Stamping the commit at
-      # link time is what makes `jacques version` and `msauth audit` able to
-      # answer "does this artifact have that fix". See README.md, "Is the
-      # installed binary current".
-      "-X"
-      "github.com/jack-work/msauth.Stamp=${msauthStamp}"
     ];
 
     # Off by default, and not because the tests are bad.
