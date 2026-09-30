@@ -93,7 +93,10 @@ else
     # msauth branch landed: the vendor derivation is built from the WORKSPACE,
     # which holds both repos, so a change on either side of the `replace` can
     # shift it even when go.mod and go.sum are untouched.
-    vendorHash = "sha256-LdD4tAdIQKyzEDC1vPkvTW+ZKr8o8mHMzaxWOU7MVLU=";
+    #
+    # Moved again 2026-09-30 for msauth a3592bb (the wslinfo PATH fallback),
+    # which confirms the paragraph above: msauth source only, go.sum untouched.
+    vendorHash = "sha256-UtDMKUTF4TYjmChcLBCTGkJKePDO54+6Zf7Rt0jS4s0=";
 
     # -trimpath IS TURNED OFF HERE, AND THAT IS THE WHOLE POINT.
     #
