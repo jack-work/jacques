@@ -1,0 +1,90 @@
+[
+ {
+  "FrameType": "DataSetHeader",
+  "IsProgressive": false,
+  "Version": "v2.0",
+  "IsFragmented": false,
+  "ErrorReportingPlacement": "InData"
+ },
+ {
+  "FrameType": "DataTable",
+  "TableId": 0,
+  "TableKind": "QueryProperties",
+  "TableName": "@ExtendedProperties",
+  "Columns": [
+   {
+    "ColumnName": "TableId",
+    "ColumnType": "int"
+   },
+   {
+    "ColumnName": "Key",
+    "ColumnType": "string"
+   },
+   {
+    "ColumnName": "Value",
+    "ColumnType": "dynamic"
+   }
+  ],
+  "Rows": [
+   [
+    1,
+    "Visualization",
+    "{\"Visualization\":null,\"Title\":null,\"XColumn\":null,\"Series\":null,\"YColumns\":null,\"AnomalyColumns\":null,\"XTitle\":null,\"YTitle\":null,\"XAxis\":null,\"YAxis\":null,\"Legend\":null,\"YSplit\":null,\"Accumulate\":false,\"IsQuerySorted\":false,\"Kind\":null,\"Ymin\":\"NaN\",\"Ymax\":\"NaN\",\"Xmin\":null,\"Xmax\":null}"
+   ]
+  ]
+ },
+ {
+  "FrameType": "DataTable",
+  "TableId": 1,
+  "TableKind": "PrimaryResult",
+  "TableName": "PrimaryResult",
+  "Columns": [
+   {
+    "ColumnName": "dcount_h",
+    "ColumnType": "long"
+   }
+  ],
+  "Rows": [
+   [
+    6866071
+   ],
+   {
+    "OneApiErrors": [
+     {
+      "error": {
+       "code": "RequestExecutionTimeout",
+       "message": "Request is invalid and cannot be executed.",
+       "@type": "Kusto.Data.Exceptions.KustoServiceTimeoutException",
+       "@message": "Query timed out",
+       "@failureCode": 400,
+       "@context": {
+        "serviceAlias": "TESTCLUSTER"
+       },
+       "@permanent": false
+      }
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "FrameType": "DataSetCompletion",
+  "HasErrors": true,
+  "Cancelled": false,
+  "OneApiErrors": [
+   {
+    "error": {
+     "code": "RequestExecutionTimeout",
+     "message": "Request is invalid and cannot be executed.",
+     "@type": "Kusto.Data.Exceptions.KustoServiceTimeoutException",
+     "@message": "Query timed out",
+     "@failureCode": 400,
+     "@context": {
+      "serviceAlias": "TESTCLUSTER"
+     },
+     "@permanent": false
+    }
+   }
+  ]
+ }
+]

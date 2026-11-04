@@ -27,6 +27,7 @@ func New(conn config.Connection) (backend.Backend, error) {
 		return nil, fmt.Errorf("kusto connection %q: no cluster URL configured", conn.Name)
 	}
 	client := kustohttp.NewClient(conn.Cluster, conn.Database, conn.Token)
+	client.Timeout = conn.Timeout
 	return &Backend{client: client, name: conn.Name}, nil
 }
 

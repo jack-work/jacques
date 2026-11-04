@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/hashicorp/hcl/v2/hclsimple"
 )
 
 type Config struct {
 	CurrentConnection string       `hcl:"current_connection,optional"`
+	QueryTimeout      string       `hcl:"query_timeout,optional"` // Go duration, e.g. "20m"; Kusto caps it at 1h
 	Connections       []Connection `hcl:"connection,block"`
 	Display           *Display     `hcl:"display,block"`
 }
@@ -26,7 +28,8 @@ type Connection struct {
 	ClientID      string `hcl:"client_id,optional"`
 	Scopes        string `hcl:"scopes,optional"`
 
-	Token string `json:"-"` // runtime only, set by auth package
+	Token   string        `json:"-"` // runtime only, set by auth package
+	Timeout time.Duration `json:"-"` // runtime only, resolved from -timeout / query_timeout
 }
 
 type Display struct {
@@ -61,6 +64,18 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return &cfg, nil
+}
+
+// Timeout parses query_timeout; zero means unset.
+func (c *Config) Timeout() (time.Duration, error) {
+	if c.QueryTimeout == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(c.QueryTimeout)
+	if err != nil {
+		return 0, fmt.Errorf("query_timeout %q in %s: %w", c.QueryTimeout, Path(), err)
+	}
+	return d, nil
 }
 
 func (c *Config) FindConnection(name string) *Connection {
@@ -108,6 +123,9 @@ func WriteDefault() error {
 }
 
 const defaultConfig = `current_connection = "telemetry"
+
+# Kusto query budget (servertimeout and client wait). Default 5m, max 1h.
+# query_timeout = "20m"
 
 connection "kusto" "telemetry" {
   cluster        = "https://mycluster.centralus.kusto.windows.net"
