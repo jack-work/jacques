@@ -22,6 +22,7 @@ import (
 	"github.com/jack-work/jacques/config"
 	"github.com/jack-work/jacques/data"
 	"github.com/jack-work/jacques/harness"
+	kustohttp "github.com/jack-work/jacques/kusto"
 	"github.com/jack-work/jacques/logging"
 	"github.com/jack-work/jacques/render"
 	"github.com/jack-work/jacques/server"
@@ -80,6 +81,7 @@ func main() {
 	queryFile := queryCmd.String("f", "", "read query from file")
 	noCache := queryCmd.Bool("no-cache", false, "bypass cache, always query backend")
 	refresh := queryCmd.Bool("refresh", false, "ignore cached result, re-query and update cache")
+	timeout := queryCmd.Duration("timeout", 0, "kusto query budget, e.g. 20m: servertimeout and client wait (overrides query_timeout; default 5m, max 1h)")
 	queryCmd.Parse(os.Args[1:])
 
 	loadEnv(".env")
@@ -114,6 +116,11 @@ func main() {
 
 	// Build resolved connection: flag > config > env > fallback
 	resolved := resolveConnection(connCfg, *cluster, *database)
+	resolved.Timeout, err = resolveTimeout(*timeout, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Resolve display settings: flag > config > defaults
 	fmtStr := resolveValue(*format, configFormat(cfg), "log")
@@ -690,6 +697,22 @@ func resolveValue(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// resolveTimeout picks the query budget: flag > config; zero leaves the
+// client default in force.
+func resolveTimeout(flagVal time.Duration, cfg *config.Config) (time.Duration, error) {
+	d := flagVal
+	if d == 0 {
+		var err error
+		if d, err = cfg.Timeout(); err != nil {
+			return 0, err
+		}
+	}
+	if d == 0 {
+		return 0, nil
+	}
+	return d, kustohttp.CheckTimeout(d)
 }
 
 func configFormat(cfg *config.Config) string {

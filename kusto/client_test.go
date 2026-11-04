@@ -134,8 +134,8 @@ func TestQueryRequestContract(t *testing.T) {
 	if got := options["queryconsistency"]; got != "strongconsistency" {
 		t.Errorf("queryconsistency = %v, want strongconsistency", got)
 	}
-	if got := options["servertimeout"]; got != "01:00:00" {
-		t.Errorf("servertimeout = %v, want 01:00:00", got)
+	if got := options["servertimeout"]; got != "00:05:00" {
+		t.Errorf("servertimeout = %v, want the 5m default 00:05:00", got)
 	}
 	if got := options["query_language"]; got != "kql" {
 		t.Errorf("query_language = %v, want kql", got)

@@ -134,6 +134,12 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resolved := *connCfg
+	timeout, err := s.cfg.Timeout()
+	if err != nil {
+		writeJSON(w, queryResult{Error: err.Error()})
+		return
+	}
+	resolved.Timeout = timeout
 	ctx := context.Background()
 
 	// check cache

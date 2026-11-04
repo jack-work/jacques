@@ -69,6 +69,7 @@ point at your cluster:
 
 ```hcl
 current_connection = "my-cluster"
+query_timeout      = "20m"   # optional; default 5m, max 1h
 
 connection "kusto" "my-cluster" {
   cluster        = "https://mycluster.region.kusto.windows.net"
@@ -179,6 +180,7 @@ jacques -c <connection> [flags] <query>
 | `-max-rows <n>` | `0` | Max rows to display (0 = unlimited) |
 | `-no-cache` | `false` | Skip DuckDB cache, always hit the cluster |
 | `-refresh` | `false` | Re-query and overwrite cached result |
+| `-timeout <dur>` | `query_timeout`, else `5m` | Kusto query budget (Go duration, max `1h`): sent as `servertimeout`; the client waits 30s longer so Kusto reports first |
 | `-cols <list>` | | Comma-separated columns to show (TUI mode) |
 | `-all-cols` | `false` | Show all columns per entry (log mode) |
 | `-time-col <name>` | `env_time` | Timestamp column (log mode) |
