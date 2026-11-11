@@ -124,6 +124,7 @@ func GetToken(ctx context.Context, conn config.Connection) (string, error) {
 	logging.Info(ctx, "token acquired",
 		logging.String("connection", conn.Name),
 		logging.String("source", result.Source),
+		logging.String("cached", fmt.Sprintf("%t", result.Cached)),
 		logging.String("expires_at", result.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z")),
 	)
 	return result.AccessToken, nil

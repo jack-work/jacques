@@ -3,6 +3,7 @@ package logging
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
@@ -38,7 +39,24 @@ func Debugf(ctx context.Context, format string, args ...interface{}) {
 	Debug(ctx, fmt.Sprintf(format, args...))
 }
 
+// minSeverity drops records below it. Info by default: per-frame Debug lines
+// were 4 of every 11 lines written on every query (38,750 on 2026-11-11).
+var minSeverity = log.SeverityInfo
+
+// setLevel reads JACQUES_LOG_LEVEL: "debug" keeps Debug records; anything
+// else keeps the Info default.
+func setLevel(level string) {
+	if strings.EqualFold(strings.TrimSpace(level), "debug") {
+		minSeverity = log.SeverityDebug
+	} else {
+		minSeverity = log.SeverityInfo
+	}
+}
+
 func emit(ctx context.Context, sev log.Severity, msg string, attrs ...log.KeyValue) {
+	if sev < minSeverity {
+		return
+	}
 	logger := global.GetLoggerProvider().Logger(instrumentationName)
 	var rec log.Record
 	rec.SetSeverity(sev)

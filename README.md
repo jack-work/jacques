@@ -179,6 +179,7 @@ jacques -c <connection> [flags] <query>
 | `-max-rows <n>` | `0` | Max rows to display (0 = unlimited) |
 | `-no-cache` | `false` | Skip DuckDB cache, always hit the cluster |
 | `-refresh` | `false` | Re-query and overwrite cached result |
+| `-caller` | `$JACQUES_CALLER` | Name recorded in the log for this run |
 | `-max-age` | `0` | Accept a cached result only if younger than this (`10m`, `6h`); `0` = any age |
 | `-cols <list>` | | Comma-separated columns to show (TUI mode) |
 | `-all-cols` | `false` | Show all columns per entry (log mode) |
@@ -218,6 +219,19 @@ Designed for telemetry data with `env_time`, `message`, and `level` columns.
 consuming from a script.
 
 **raw** -- same as table but no column width limit.
+
+## Logging
+
+jacques appends structured records to `jacques.log` in, by precedence:
+`$JACQUES_LOG_DIR`, `%APPDATA%\jacques` (Windows), `$XDG_STATE_HOME/jacques`,
+`~/.local/state/jacques`. It never writes into the working directory.
+Records below Info are dropped unless `JACQUES_LOG_LEVEL=debug`. Rotation is
+the host's job (logrotate, copytruncate: jacques appends and never reopens).
+
+Automated callers should name themselves with `-caller <name>` (or
+`JACQUES_CALLER`); it is recorded on each run's start record so usage can be
+attributed. The `token acquired` record carries `cached`, which says whether
+msauth served the token from its cache or went to the broker.
 
 ## Cache
 

@@ -7,18 +7,40 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutlog"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
 type Shutdown func()
 
+// Dir is where jacques writes jacques.log, in order: $JACQUES_LOG_DIR;
+// %APPDATA%\jacques (Windows sets APPDATA); $XDG_STATE_HOME/jacques;
+// ~/.local/state/jacques. Never the working directory: with APPDATA unset on
+// Linux the old filepath.Join("", "jacques") was relative, so every caller
+// grew ./jacques/jacques.log wherever it ran (one reached 1.3 GB).
+func Dir() string {
+	if d := os.Getenv("JACQUES_LOG_DIR"); d != "" {
+		return d
+	}
+	if d := os.Getenv("APPDATA"); d != "" {
+		return filepath.Join(d, "jacques")
+	}
+	if d := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(d) {
+		return filepath.Join(d, "jacques")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".local", "state", "jacques")
+	}
+	return filepath.Join(os.TempDir(), "jacques")
+}
+
 func Init(serviceName string) (Shutdown, error) {
-	logDir := filepath.Join(os.Getenv("APPDATA"), "jacques")
+	setLevel(os.Getenv("JACQUES_LOG_LEVEL"))
+	logDir := Dir()
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return func() {}, err
 	}
