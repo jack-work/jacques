@@ -70,7 +70,21 @@ func initSchema(db *sql.DB) error {
 			accessed_at TIMESTAMP DEFAULT current_timestamp
 		)
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Ages are kept as Unix seconds written by Go. created_at/accessed_at are
+	// TIMESTAMP columns filled from current_timestamp, which DuckDB converts
+	// through the session time zone: read back into Go they carry local wall
+	// time labelled UTC, so any age computed from them is off by the zone
+	// offset. Rows written before these columns existed have NULL here and
+	// count as infinitely old.
+	for _, col := range []string{"created_unix", "accessed_unix"} {
+		if _, err := db.Exec("ALTER TABLE cache_meta ADD COLUMN IF NOT EXISTS " + col + " BIGINT"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *DuckCache) Close() error { return nil }
@@ -84,7 +98,11 @@ func tableName(key string) string {
 	return "cache_" + key
 }
 
-func (c *DuckCache) Get(ctx context.Context, connName, query string) (data.RowStore, bool) {
+// Get returns the cached result for (connName, query). maxAge 0 accepts an
+// entry of any age (the behaviour before -max-age existed); a positive maxAge
+// accepts only an entry written less than maxAge ago, so automated callers can
+// use the cache without risking an arbitrarily stale answer.
+func (c *DuckCache) Get(ctx context.Context, connName, query string, maxAge time.Duration) (data.RowStore, bool) {
 	db, err := openRO()
 	if err != nil {
 		return nil, false
@@ -95,11 +113,27 @@ func (c *DuckCache) Get(ctx context.Context, connName, query string) (data.RowSt
 	tbl := tableName(key)
 
 	var rowCount int
+	var created sql.NullInt64
 	err = db.QueryRowContext(ctx,
-		"SELECT row_count FROM cache_meta WHERE key = ?", key,
-	).Scan(&rowCount)
+		"SELECT row_count, created_unix FROM cache_meta WHERE key = ?", key,
+	).Scan(&rowCount, &created)
 	if err != nil {
 		return nil, false
+	}
+	if maxAge > 0 {
+		age := time.Duration(-1)
+		if created.Valid {
+			age = time.Since(time.Unix(created.Int64, 0))
+		}
+		if age < 0 || age >= maxAge {
+			logging.Info(ctx, "duckdb cache stale",
+				logging.String("key", key),
+				logging.String("connection", connName),
+				logging.String("age", age.Truncate(time.Second).String()),
+				logging.String("max_age", maxAge.String()),
+			)
+			return nil, false
+		}
 	}
 
 	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT * FROM %s", tbl))
@@ -119,16 +153,17 @@ func (c *DuckCache) Get(ctx context.Context, connName, query string) (data.RowSt
 		logging.Int("rows", store.RowCount()),
 	)
 
-	// Touch accessed_at in a brief write connection
-	go func() {
-		wdb, err := openRW()
-		if err != nil {
-			return
-		}
-		defer wdb.Close()
-		wdb.ExecContext(context.Background(),
-			"UPDATE cache_meta SET accessed_at = current_timestamp WHERE key = ?", key)
-	}()
+	// Record the access for LRU eviction. Synchronous on purpose: a goroutine
+	// here never ran in the CLI, which exits as soon as it has printed, so
+	// accessed_at was never updated and "least recently used" meant "oldest".
+	// A failure (another process holds the write lock) only costs recency.
+	db.Close()
+	if wdb, err := openRW(); err == nil {
+		wdb.ExecContext(ctx,
+			"UPDATE cache_meta SET accessed_at = current_timestamp, accessed_unix = ? WHERE key = ?",
+			time.Now().Unix(), key)
+		wdb.Close()
+	}
 
 	return store, true
 }
@@ -186,10 +221,20 @@ func (c *DuckCache) Put(ctx context.Context, connName, query string, store data.
 		}
 	}
 
-	db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO cache_meta (key, conn_name, query, table_name, row_count, col_count)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		key, connName, query, tbl, store.RowCount(), len(cols))
+	now := time.Now().Unix()
+	if _, err := db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO cache_meta
+		   (key, conn_name, query, table_name, row_count, col_count, created_unix, accessed_unix)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		key, connName, query, tbl, store.RowCount(), len(cols), now, now); err != nil {
+		return fmt.Errorf("record cache entry: %w", err)
+	}
+
+	if evicted, err := evict(ctx, db, MaxRows(), key); err != nil {
+		logging.Warn(ctx, "duckdb cache eviction failed", logging.String("error", err.Error()))
+	} else if evicted > 0 {
+		logging.Info(ctx, "duckdb cache evicted", logging.Int("entries", evicted))
+	}
 
 	logging.Info(ctx, "duckdb cache put",
 		logging.String("key", key),
@@ -200,6 +245,48 @@ func (c *DuckCache) Put(ctx context.Context, connName, query string, store data.
 	return nil
 }
 
+// evict drops least recently used entries until the cached rows fit within
+// maxRows. keep (the entry just written) is never evicted, even when it alone
+// exceeds the budget. maxRows 0 disables eviction.
+func evict(ctx context.Context, db *sql.DB, maxRows int, keep string) (int, error) {
+	if maxRows <= 0 {
+		return 0, nil
+	}
+	rows, err := db.QueryContext(ctx, `SELECT key, table_name, row_count FROM cache_meta
+		ORDER BY key = ? DESC, COALESCE(accessed_unix, 0) DESC`, keep)
+	if err != nil {
+		return 0, err
+	}
+	type victim struct{ key, table string }
+	var victims []victim
+	total := 0
+	for rows.Next() {
+		var k, t string
+		var n int
+		if err := rows.Scan(&k, &t, &n); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		total += n
+		if k != keep && total > maxRows {
+			victims = append(victims, victim{k, t})
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, v := range victims {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", v.table)); err != nil {
+			return 0, err
+		}
+		if _, err := db.ExecContext(ctx, "DELETE FROM cache_meta WHERE key = ?", v.key); err != nil {
+			return 0, err
+		}
+	}
+	return len(victims), nil
+}
+
 func (c *DuckCache) List(ctx context.Context) ([]CacheEntry, error) {
 	db, err := openRO()
 	if err != nil {
@@ -208,7 +295,7 @@ func (c *DuckCache) List(ctx context.Context) ([]CacheEntry, error) {
 	defer db.Close()
 
 	rows, err := db.QueryContext(ctx,
-		"SELECT key, conn_name, query, row_count, col_count, created_at, accessed_at FROM cache_meta ORDER BY accessed_at DESC")
+		"SELECT key, conn_name, query, row_count, col_count, created_unix FROM cache_meta ORDER BY COALESCE(accessed_unix, 0) DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -217,11 +304,13 @@ func (c *DuckCache) List(ctx context.Context) ([]CacheEntry, error) {
 	var entries []CacheEntry
 	for rows.Next() {
 		var e CacheEntry
-		var createdAt, accessedAt time.Time
-		if err := rows.Scan(&e.Key, &e.Conn, &e.Query, &e.Rows, &e.Cols, &createdAt, &accessedAt); err != nil {
+		var created sql.NullInt64
+		if err := rows.Scan(&e.Key, &e.Conn, &e.Query, &e.Rows, &e.Cols, &created); err != nil {
 			continue
 		}
-		e.Timestamp = createdAt
+		if created.Valid {
+			e.Timestamp = time.Unix(created.Int64, 0)
+		}
 		entries = append(entries, e)
 	}
 	return entries, nil

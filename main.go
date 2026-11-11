@@ -80,6 +80,7 @@ func main() {
 	queryFile := queryCmd.String("f", "", "read query from file")
 	noCache := queryCmd.Bool("no-cache", false, "bypass cache, always query backend")
 	refresh := queryCmd.Bool("refresh", false, "ignore cached result, re-query and update cache")
+	maxAge := queryCmd.Duration("max-age", 0, "accept a cached result only if younger than this (e.g. 10m, 6h); 0 = any age")
 	queryCmd.Parse(os.Args[1:])
 
 	loadEnv(".env")
@@ -176,7 +177,7 @@ func main() {
 	// Check cache
 	var store data.RowStore
 	if useCache && !*refresh {
-		if cached, ok := dc.Get(ctx, resolved.Name, kql); ok {
+		if cached, ok := dc.Get(ctx, resolved.Name, kql, *maxAge); ok {
 			store = cached
 			status("✓", "cache hit — %s%d rows%s", ansiBold, store.RowCount(), ansiDim)
 		}
@@ -343,7 +344,10 @@ func handleCache(args []string) {
 		fmt.Fprintln(tw, "#\tCONN\tROWS\tCOLS\tAGE\tTABLE\tQUERY")
 		fmt.Fprintln(tw, "-\t----\t----\t----\t---\t-----\t-----")
 		for i, e := range entries {
-			age := time.Since(e.Timestamp).Truncate(time.Second)
+			age := "?" // written before ages were recorded
+			if !e.Timestamp.IsZero() {
+				age = time.Since(e.Timestamp).Truncate(time.Second).String()
+			}
 			query := e.Query
 			query = strings.ReplaceAll(query, "\n", " ")
 			query = strings.ReplaceAll(query, "\r", "")
@@ -394,7 +398,11 @@ func handleCache(args []string) {
 		fmt.Fprintf(os.Stderr, "connection: %s\n", e.Conn)
 		fmt.Fprintf(os.Stderr, "table:      %s\n", tblName)
 		fmt.Fprintf(os.Stderr, "rows:       %d\n", e.Rows)
-		fmt.Fprintf(os.Stderr, "cached:     %s ago\n", time.Since(e.Timestamp).Truncate(time.Second))
+		if e.Timestamp.IsZero() {
+			fmt.Fprintf(os.Stderr, "cached:     unknown (written before ages were recorded)\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "cached:     %s ago\n", time.Since(e.Timestamp).Truncate(time.Second))
+		}
 		fmt.Fprintf(os.Stderr, "---\n")
 		fmt.Println(e.Query)
 

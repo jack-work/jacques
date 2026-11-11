@@ -1,188 +1,33 @@
 package cache
 
 import (
-	"compress/gzip"
-	"context"
-	"crypto/sha256"
-	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/jack-work/jacques/config"
-	"github.com/jack-work/jacques/data"
-	"github.com/jack-work/jacques/logging"
 )
 
-type entry struct {
-	Columns   []data.Column     `json:"columns"`
-	Rows      [][]interface{}   `json:"rows"`
-	Query     string            `json:"query"`
-	Conn      string            `json:"connection"`
-	Timestamp time.Time         `json:"timestamp"`
-}
-
+// Dir is the directory holding the cache database.
 func Dir() string {
 	return filepath.Join(config.Dir(), "cache")
 }
 
-func cacheKey(connName, query string) string {
-	h := sha256.Sum256([]byte(connName + "\x00" + query))
-	return fmt.Sprintf("%x", h[:12])
-}
+// DefaultMaxRows is the total number of cached rows kept before the least
+// recently used entries are evicted. Every cached cell is a VARCHAR, so rows
+// are the honest proxy for size: the database file does not shrink when a
+// table is dropped (DuckDB reuses the freed blocks), so its byte size cannot
+// be the budget.
+const DefaultMaxRows = 2_000_000
 
-func cachePath(key string) string {
-	return filepath.Join(Dir(), key+".json.gz")
-}
-
-func Get(ctx context.Context, connName, query string) (data.RowStore, bool) {
-	key := cacheKey(connName, query)
-	path := cachePath(key)
-
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, false
+// MaxRows is the eviction budget: JACQUES_CACHE_MAX_ROWS when set to an
+// integer (0 disables eviction), DefaultMaxRows otherwise.
+func MaxRows() int {
+	if v, err := strconv.Atoi(os.Getenv("JACQUES_CACHE_MAX_ROWS")); err == nil && v >= 0 {
+		return v
 	}
-	defer f.Close()
-
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		return nil, false
-	}
-	defer gz.Close()
-
-	var e entry
-	if err := json.NewDecoder(gz).Decode(&e); err != nil {
-		return nil, false
-	}
-
-	logging.Info(ctx, "cache hit",
-		logging.String("key", key),
-		logging.String("connection", connName),
-		logging.Int("rows", len(e.Rows)),
-	)
-
-	return data.NewMemoryStore(e.Columns, e.Rows), true
-}
-
-func Put(ctx context.Context, connName, query string, store data.RowStore) error {
-	if err := os.MkdirAll(Dir(), 0o755); err != nil {
-		return err
-	}
-
-	cols := store.Columns()
-	rows := make([][]interface{}, store.RowCount())
-	for i := 0; i < store.RowCount(); i++ {
-		row, err := store.Row(i)
-		if err != nil {
-			return err
-		}
-		rows[i] = row
-	}
-
-	key := cacheKey(connName, query)
-	path := cachePath(key)
-
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	gz := gzip.NewWriter(f)
-
-	e := entry{
-		Columns:   cols,
-		Rows:      rows,
-		Query:     query,
-		Conn:      connName,
-		Timestamp: time.Now(),
-	}
-
-	if err := json.NewEncoder(gz).Encode(&e); err != nil {
-		gz.Close()
-		return err
-	}
-
-	if err := gz.Close(); err != nil {
-		return err
-	}
-
-	logging.Info(ctx, "cache put",
-		logging.String("key", key),
-		logging.String("connection", connName),
-		logging.Int("rows", len(rows)),
-	)
-
-	return nil
-}
-
-func Clear() error {
-	dir := Dir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	for _, e := range entries {
-		os.Remove(filepath.Join(dir, e.Name()))
-	}
-	return nil
-}
-
-func List() ([]CacheEntry, error) {
-	dir := Dir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	var result []CacheEntry
-	for _, de := range entries {
-		if !de.Type().IsRegular() {
-			continue
-		}
-		path := filepath.Join(dir, de.Name())
-		f, err := os.Open(path)
-		if err != nil {
-			continue
-		}
-		gz, err := gzip.NewReader(f)
-		if err != nil {
-			f.Close()
-			continue
-		}
-		var e entry
-		err = json.NewDecoder(gz).Decode(&e)
-		gz.Close()
-		f.Close()
-		if err != nil {
-			continue
-		}
-
-		info, _ := de.Info()
-		size := int64(0)
-		if info != nil {
-			size = info.Size()
-		}
-
-		result = append(result, CacheEntry{
-			Key:       de.Name(),
-			Conn:      e.Conn,
-			Query:     e.Query,
-			Rows:      len(e.Rows),
-			Cols:      len(e.Columns),
-			Timestamp: e.Timestamp,
-			SizeBytes: size,
-		})
-	}
-	return result, nil
+	return DefaultMaxRows
 }
 
 type CacheEntry struct {

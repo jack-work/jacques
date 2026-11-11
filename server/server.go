@@ -138,7 +138,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// check cache
 	if s.cache != nil {
-		if store, ok := s.cache.Get(ctx, resolved.Name, req.Query); ok {
+		if store, ok := s.cache.Get(ctx, resolved.Name, req.Query, 0); ok {
 			fmt.Fprintf(os.Stderr, "[jacques-web] cache hit: %d rows\n", store.RowCount())
 			result := buildResult(store, resolved.Name, req.Query, 0)
 			result.Cached = true

@@ -179,6 +179,7 @@ jacques -c <connection> [flags] <query>
 | `-max-rows <n>` | `0` | Max rows to display (0 = unlimited) |
 | `-no-cache` | `false` | Skip DuckDB cache, always hit the cluster |
 | `-refresh` | `false` | Re-query and overwrite cached result |
+| `-max-age` | `0` | Accept a cached result only if younger than this (`10m`, `6h`); `0` = any age |
 | `-cols <list>` | | Comma-separated columns to show (TUI mode) |
 | `-all-cols` | `false` | Show all columns per entry (log mode) |
 | `-time-col <name>` | `env_time` | Timestamp column (log mode) |
@@ -234,6 +235,19 @@ jacques cache path                                        # print cache db path
 
 Use `-no-cache` to bypass the cache entirely, or `-refresh` to re-query and
 update the cached result.
+
+**Automated callers should use `-max-age`, not `-no-cache`.** Without it a hit
+can be arbitrarily old; with it a hit is accepted only if the result was cached
+less than that long ago, otherwise jacques queries and re-caches. Pick the age
+from the data: a query over a closed window (yesterday, an hour that has
+settled past ingest lag) can take `-max-age 24h`; a "last 15 minutes" query
+wants about its own refresh interval.
+
+The cache keeps at most 2,000,000 rows in total (every cell is stored as text,
+so rows are the size measure). Past that, the least recently read entries are
+evicted after each write; the entry just written is always kept. Override with
+`JACQUES_CACHE_MAX_ROWS` (`0` disables eviction). Entries cached before ages
+were recorded show age `?` and never satisfy a positive `-max-age`.
 
 ## Web UI
 
