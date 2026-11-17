@@ -80,7 +80,7 @@ func main() {
 	queryFile := queryCmd.String("f", "", "read query from file")
 	noCache := queryCmd.Bool("no-cache", false, "bypass cache, always query backend")
 	refresh := queryCmd.Bool("refresh", false, "ignore cached result, re-query and update cache")
-	caller := queryCmd.String("caller", os.Getenv("JACQUES_CALLER"), "name recorded in the log for this run (default $JACQUES_CALLER), so usage can be attributed")
+	caller := queryCmd.String("caller", defaultCaller(), "name recorded in the log for this run (default $JACQUES_CALLER, else the systemd unit, else parent:<name>), so usage can be attributed")
 	maxAge := queryCmd.Duration("max-age", 0, "accept a cached result only if younger than this (e.g. 10m, 6h); 0 = any age")
 	queryCmd.Parse(os.Args[1:])
 
